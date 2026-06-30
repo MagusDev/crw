@@ -1941,6 +1941,71 @@ impl CdpRenderer {
             .map(|s| s.to_string())
     }
 
+    /// Read the page's clearance cookies (`cf_clearance` / `__cf_bm`) for `url`
+    /// via CDP `Network.getCookies`, filtered to the clearance pair. Best-effort:
+    /// any error yields an empty vec (→ `ClearanceCache::put` no-ops).
+    async fn capture_clearance_cookies(
+        conn: &CdpConnection,
+        session_id: &str,
+        url: &str,
+    ) -> Vec<crate::clearance::ClearanceCookie> {
+        let Ok(resp) = conn
+            .send_recv(
+                "Network.getCookies",
+                serde_json::json!({ "urls": [url] }),
+                Some(session_id),
+                Duration::from_secs(2),
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        let Some(arr) = resp.get("cookies").and_then(|c| c.as_array()) else {
+            return Vec::new();
+        };
+        // `Network.getCookies` can return the same clearance name under two
+        // domain scopes (host `www.x` + domain `.x`). Dedupe by name, preferring
+        // a domain-wide (leading-dot) scope so the re-injected cookie matches the
+        // broadest path Cloudflare set — otherwise injected + server copies
+        // accumulate across a crawl.
+        let mut by_name: std::collections::HashMap<String, crate::clearance::ClearanceCookie> =
+            std::collections::HashMap::new();
+        for c in arr {
+            let Some(name) = c.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            if !crate::clearance::is_clearance_cookie(name) {
+                continue;
+            }
+            let (Some(value), Some(domain)) = (
+                c.get("value").and_then(|v| v.as_str()),
+                c.get("domain").and_then(|d| d.as_str()),
+            ) else {
+                continue;
+            };
+            let cookie = crate::clearance::ClearanceCookie {
+                name: name.to_string(),
+                value: value.to_string(),
+                domain: domain.to_string(),
+                path: c
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("/")
+                    .to_string(),
+                secure: c.get("secure").and_then(|s| s.as_bool()).unwrap_or(true),
+                http_only: c.get("httpOnly").and_then(|s| s.as_bool()).unwrap_or(false),
+            };
+            // Keep the existing entry only if it's domain-wide and the new one isn't.
+            match by_name.get(name) {
+                Some(existing) if existing.domain.starts_with('.') && !domain.starts_with('.') => {}
+                _ => {
+                    by_name.insert(name.to_string(), cookie);
+                }
+            }
+        }
+        by_name.into_values().collect()
+    }
+
     /// Scroll the page viewport-by-viewport until `document.body.scrollHeight`
     /// stops growing or `AUTO_SCROLL_MAX_STEPS` is reached. Triggers lazy-loaded
     /// images, infinite-scroll feeds, and below-the-fold hydration.
@@ -2403,6 +2468,86 @@ impl CdpRenderer {
             .ok();
         }
 
+        // cf_clearance reuse (chrome family only — lightpanda can't execute a
+        // Cloudflare challenge, and routes Network.* through Emulation.* so
+        // setCookie/getCookies aren't reliable). Compute the cache key once;
+        // inject a still-valid cached clearance cookie BEFORE navigating so
+        // Cloudflare serves the real page instead of a challenge.
+        //
+        // The cookie is bound by Cloudflare to (IP, UA, TLS/JA3), so all three
+        // are pinned: the sticky-per-host proxy keeps the IP (part of the key),
+        // `effective_ua` keeps the UA (also part of the key — a caller-supplied
+        // UA override must not replay a cookie solved under a different one),
+        // and this IS Chrome so the JA3 matches.
+        let clearance_key: Option<String> = if self.name == "lightpanda" {
+            None
+        } else {
+            url::Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_string()))
+                .map(|host| {
+                    let proxy_id = crate::REQUEST_PROXY
+                        .try_with(|p| p.as_ref().map(|e| e.raw().to_string()))
+                        .ok()
+                        .flatten();
+                    crate::clearance::ClearanceCache::key(&host, proxy_id.as_deref(), effective_ua)
+                })
+        };
+        // Single-flight: the FIRST fetch to a cold `(host,proxy)` holds the solve
+        // lock across navigate+capture, so concurrent same-key fetches (a crawl
+        // hammering one host) wait for that one solve instead of stampeding
+        // Cloudflare with N simultaneous challenges (which gets the IP banned).
+        // A waiter that finds the cookie already cached drops the lock at once and
+        // proceeds in parallel — only the actual solver serialises. (Belt-and-
+        // suspenders to the per-host limiter, which already serialises at
+        // politeness=1.) `_solve_guard` releases when fetch_inner returns.
+        let mut _solve_guard: Option<tokio::sync::OwnedMutexGuard<()>> = None;
+        let inject_cookies = match &clearance_key {
+            None => None,
+            Some(key) => {
+                let cache = crate::clearance::clearance_cache();
+                match cache.get(key) {
+                    hit @ Some(_) => hit,
+                    None => {
+                        let guard = cache.solve_lock(key).lock_owned().await;
+                        match cache.get(key) {
+                            // Solved while we waited → reuse, release immediately.
+                            hit @ Some(_) => hit,
+                            // Cold: we're the solver — hold the lock through capture.
+                            None => {
+                                _solve_guard = Some(guard);
+                                None
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        if let Some(cookies) = &inject_cookies {
+            for c in cookies {
+                let _ = conn
+                    .send_recv(
+                        "Network.setCookie",
+                        serde_json::json!({
+                            "name": c.name,
+                            "value": c.value,
+                            "domain": c.domain,
+                            "path": c.path,
+                            "secure": c.secure,
+                            "httpOnly": c.http_only,
+                        }),
+                        Some(&session_id),
+                        self.page_timeout,
+                    )
+                    .await;
+            }
+            tracing::debug!(
+                url,
+                count = cookies.len(),
+                "injected cached clearance cookies"
+            );
+        }
+
         // Subscribe to events BEFORE navigating so we don't miss loadEventFired.
         let events_rx = conn.subscribe();
 
@@ -2676,6 +2821,21 @@ impl CdpRenderer {
             Ok(_) => Self::eval_href(conn, &session_id, Duration::from_secs(2)).await,
             Err(_) => None,
         };
+
+        // Capture clearance cookies on success, before the target is torn down.
+        // `put` is a no-op when no clearance cookie is present, so a still-blocked
+        // page caches nothing. This also self-heals a stale injected cookie: when
+        // it was rejected, Chrome solves the fresh challenge and we capture the
+        // new cookie here. Best-effort — never affects the fetch result.
+        if let Some(key) = &clearance_key
+            && outcome.is_ok()
+        {
+            let cookies = Self::capture_clearance_cookies(conn, &session_id, url).await;
+            if !cookies.is_empty() {
+                tracing::debug!(url, count = cookies.len(), "captured clearance cookies");
+            }
+            crate::clearance::clearance_cache().put(key, cookies);
+        }
 
         // Target close is the caller's responsibility (pool's release() owns
         // it via the recorded target_id; legacy fetch_with_ws closes after

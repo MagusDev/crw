@@ -45,6 +45,7 @@ pub mod camoufox;
 pub mod cdp;
 #[cfg(feature = "cdp")]
 pub mod cdp_conn;
+pub mod clearance;
 #[cfg(feature = "cloak")]
 pub mod cloak;
 pub mod detector;
