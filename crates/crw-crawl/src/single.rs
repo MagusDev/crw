@@ -1167,6 +1167,23 @@ fn classify_block(
             reason: "cloudflare block page (cf-error-code)".to_string(),
         });
     }
+    // Vercel's bot-check interstitial beats the guard too — the real page (with
+    // its "Website owner? Click here to fix" link) extracts to ~135 bytes, over
+    // threshold, so antibot::classify's Vercel pattern (which requires this same
+    // heading + verifying/failed phrase) never runs. Caught only by testing
+    // against REAL production captures: the synthetic fixture used to validate
+    // the antibot.rs pattern was artificially short and never hit this guard,
+    // so this gap shipped once already — mirror the Reddit/CF strong-marker
+    // pattern here too.
+    if html.contains("Vercel Security Checkpoint")
+        && (html.contains("verifying your browser")
+            || html.contains("Failed to verify your browser"))
+    {
+        return Some(BlockOutcome {
+            vendor: "vercel".to_string(),
+            reason: "Vercel security checkpoint".to_string(),
+        });
+    }
     if markdown.map(|m| m.trim().len()).unwrap_or(0) >= threshold {
         return None;
     }
@@ -1312,6 +1329,29 @@ mod tests {
         assert_eq!(b.vendor, "generic_block");
     }
 
+    // Regression using the ACTUAL text captured in prod (9-day trace-log
+    // investigation, 2026-07-15..23) rather than a synthetic fixture — this is
+    // exactly what caught the Vercel gap below (the synthetic fixture used to
+    // ship that fix was artificially short and never exercised this guard).
+    // Raw HTML wasn't captured (format=markdown only); the real markdown
+    // stands in for html here since this check is a text match, not
+    // DOM-structural.
+    #[test]
+    fn classify_block_reddit_real_prod_capture() {
+        let real_markdown = "You've been blocked by network security.\n\nTo continue, log in to your Reddit account or use your developer token  \n  \nIf you think you've been blocked by mistake, file a ticket below and we'll look into it.\n\n[Log in](https://www.reddit.com/login/) [File a ticket](https://support.reddithelp.com/hc/en-us/requests/new?ticket_form_id=21879292693140)";
+        assert!(real_markdown.len() >= THRESH);
+        let b = classify_block(
+            200,
+            Some("text/html"),
+            real_markdown,
+            Some(real_markdown),
+            false,
+            THRESH,
+        )
+        .expect("the exact text that silently returned success:true 198x in prod must be flagged");
+        assert_eq!(b.vendor, "network_security");
+    }
+
     #[test]
     fn classify_block_reddit_network_security_over_markdown_guard() {
         // Regression: Reddit's own block page extracts to ~115 bytes of prose
@@ -1388,6 +1428,47 @@ mod tests {
         assert!(
             classify_block(200, Some("text/html"), html, Some(md), false, THRESH).is_none(),
             "a page merely rendering the cf-error-code marker without the block heading must not be misflagged"
+        );
+    }
+
+    #[test]
+    fn classify_block_vercel_checkpoint_over_markdown_guard_real_capture() {
+        // Regression using the EXACT text captured in prod (2026-07-24 trace-log
+        // investigation): the real Vercel checkpoint page's "Website owner?
+        // Click here to fix" link pushes it to ~135 bytes, over THRESH, so
+        // antibot::classify's Vercel pattern never ran — this shipped once
+        // already because the synthetic fixture used to validate that pattern
+        // was artificially short (~58 bytes) and never hit this guard.
+        let html = "<html><body><h1>Vercel Security Checkpoint</h1>\
+            <p>We're verifying your browser</p>\
+            <p><a href=\"https://vercel.link/security-checkpoint\">Website owner? Click here to fix</a></p>\
+            </body></html>";
+        let md = "# Vercel Security Checkpoint\n\nWe're verifying your browser\n\n\
+            [Website owner? Click here to fix](https://vercel.link/security-checkpoint)";
+        assert!(
+            md.len() >= THRESH,
+            "this is the real-world case: the fixture must exceed the guard"
+        );
+        let b = classify_block(200, Some("text/html"), html, Some(md), false, THRESH)
+            .expect("vercel checkpoint must be flagged even with substantial markdown");
+        assert_eq!(b.vendor, "vercel");
+    }
+
+    #[test]
+    fn classify_block_vercel_mention_alone_is_not_enough() {
+        // Negative: a page that merely mentions Vercel (a common hosting
+        // platform) with no checkpoint heading must not be misflagged.
+        let html = "<html><body><article><h1>Deploying on Vercel</h1>\
+            <p>This site is deployed on Vercel, a popular platform for hosting \
+            frontend applications and static sites with automatic previews on \
+            every pull request submitted to the repository.</p></article></body></html>";
+        let md = "# Deploying on Vercel\n\nThis site is deployed on Vercel, a popular \
+            platform for hosting frontend applications and static sites with \
+            automatic previews on every pull request submitted to the repository.";
+        assert!(md.len() >= THRESH);
+        assert!(
+            classify_block(200, Some("text/html"), html, Some(md), false, THRESH).is_none(),
+            "an article merely mentioning Vercel without the checkpoint heading must not be misflagged"
         );
     }
 
