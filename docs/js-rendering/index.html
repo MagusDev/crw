@@ -584,6 +584,7 @@ is skipped rather than failing every request.</p>
 <ul>
 <li><strong>Empty content from JS-heavy sites</strong>: Increase <code>waitFor</code> (e.g., <code>3000</code>-<code>5000</code>). Some SPAs need extra time to hydrate.</li>
 <li><strong><code>renderedWith: &quot;http_only_fallback&quot;</code> in metadata</strong>: JS rendering was requested but no renderer is available. Check your deployment configuration.</li>
+<li><strong><code>renderedWith: &quot;http&quot;</code> plus a <code>js_escalation_failed:</code> warning</strong>: a renderer was configured and attempted, but every tier failed. The HTTP body is returned instead of an error so the request still yields content. The usual cause is a <code>timeout</code> too short for a browser — a cold Chrome navigation can take 15s or more on a heavy page.</li>
 <li><strong>Internal error on <code>renderJs: true</code></strong>: Verify the LightPanda sidecar is running and reachable. Check <code>/health</code> for renderer status.</li>
 <li><strong>Still poor output after increasing <code>waitFor</code></strong>: The issue may be anti-bot protection or authentication flow, not rendering delay.</li>
 </ul>

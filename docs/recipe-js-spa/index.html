@@ -556,7 +556,13 @@ else:
 <hr>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <p><strong><code>renderedWith</code> is <code>&quot;http&quot;</code> even with <code>renderJs: true</code></strong>
-No JS renderer is configured. Check your deployment or use the cloud endpoint (<code>https://api.fastcrw.com</code>).</p>
+Check <code>warning</code>. If it starts with <code>js_escalation_failed:</code>, a renderer was
+configured and tried but every tier failed (usually the deadline was too short
+for a browser — raise <code>timeout</code>); the HTTP body is returned rather than an error
+so you still get content. A PDF also legitimately reports <code>&quot;http&quot;</code>, because
+there is no DOM to render. If <code>renderedWith</code> is <code>&quot;http_only_fallback&quot;</code> instead,
+no JS renderer is configured at all: check your deployment or use the cloud
+endpoint (<code>https://api.fastcrw.com</code>).</p>
 <p><strong>Markdown is still empty after rendering</strong>
 The page may be behind an anti-bot wall. Look for a <code>warnings</code> array in the response — it will name the vendor (Cloudflare, Akamai, etc.). Switch to <code>renderer: &quot;chrome_proxy&quot;</code> with a <code>country</code> code to route through a residential IP.</p>
 <p><strong><code>error_code: &quot;invalid_request&quot;</code> when pinning</strong>
