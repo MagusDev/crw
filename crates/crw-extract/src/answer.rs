@@ -847,4 +847,212 @@ mod tests {
         let out = select_relevant_passages(&long, "   ", 100);
         assert_eq!(out.len(), 100);
     }
+
+    // ---------------------------------------------------------------------
+    // Offline recall@budget harness.
+    //
+    // Replays a frozen capture of prod search+scrape output through the real
+    // selection code and reports whether the gold answer survives into the
+    // assembled per-source window. No LLM, no network: prod latency variance
+    // (which swamped every sampled A/B so far) is removed entirely, so a lever
+    // can be measured in seconds instead of a 30-minute noisy prod run.
+    //
+    //   RB_CAP=/path/cap50.jsonl RB_BUDGET=8192 \
+    //     cargo test -p crw-extract --release recall_at_budget -- --nocapture --ignored
+    //
+    // Capture line shape: {"q":..,"gold":..,"sources":[{"url":..,"markdown":..}]}
+    // ---------------------------------------------------------------------
+
+    /// Lowercase, strip everything that isn't alphanumeric or a space, collapse
+    /// runs of space. Makes gold matching robust to markdown punctuation
+    /// (`**June 24**`, `June&nbsp;24`, `June 24,`) without loosening it to a
+    /// per-token match, which would fire on unrelated text.
+    fn norm(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut sp = false;
+        for c in s.chars() {
+            if c.is_alphanumeric() {
+                if sp && !out.is_empty() {
+                    out.push(' ');
+                }
+                sp = false;
+                out.extend(c.to_lowercase());
+            } else {
+                sp = true;
+            }
+        }
+        out
+    }
+
+    /// Strict: the gold phrase appears verbatim (post-normalization).
+    fn has_gold(hay_norm: &str, gold_norm: &str) -> bool {
+        !gold_norm.is_empty() && hay_norm.contains(gold_norm)
+    }
+
+    /// Fair: every content token of the gold appears somewhere in the window.
+    /// An LLM can answer "The Coast Guard" from a page saying "U.S. Coast
+    /// Guard", which the strict phrase match rejects. Stopword-ish 1-2 char
+    /// tokens are dropped so they can't carry a match on their own.
+    fn has_gold_tokens(hay_norm: &str, gold_norm: &str) -> bool {
+        let toks: Vec<&str> = gold_norm.split(' ').filter(|t| t.len() > 2).collect();
+        if toks.is_empty() {
+            return has_gold(hay_norm, gold_norm);
+        }
+        toks.iter().all(|t| hay_norm.contains(t))
+    }
+
+    #[test]
+    #[ignore = "needs RB_CAP capture file; run explicitly"]
+    fn recall_at_budget() {
+        let path = std::env::var("RB_CAP").expect("set RB_CAP=<capture.jsonl>");
+        let budget: usize = std::env::var("RB_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8192);
+        let raw = std::fs::read_to_string(&path).expect("read RB_CAP");
+
+        // Per-question outcomes, each "did ANY source carry the gold".
+        // `_s` = strict phrase match, `_t` = all-tokens match.
+        let (mut n, mut ret_s, mut ret_t) = (0usize, 0usize, 0usize);
+        let (mut head_t, mut bm25_t) = (0usize, 0usize);
+        let (mut snip_t, mut no_md) = (0usize, 0usize);
+        let mut lost: Vec<String> = Vec::new();
+        let mut missed: Vec<String> = Vec::new();
+
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let row: serde_json::Value = serde_json::from_str(line).expect("bad capture line");
+            let q = row["q"].as_str().unwrap_or_default();
+            let gold = norm(row["gold"].as_str().unwrap_or_default());
+            let sources = row["sources"].as_array().cloned().unwrap_or_default();
+            n += 1;
+
+            let (mut rs, mut rt, mut h, mut b, mut sn) = (false, false, false, false, false);
+            let mut best_frac: Option<f64> = None;
+            let mut empty_md = 0usize;
+            for s in &sources {
+                // Title + snippet reach the model too (and are the whole source
+                // when `snippet_fallback` fires), so they count as retrieval.
+                let meta = norm(&format!(
+                    "{} {}",
+                    s["title"].as_str().unwrap_or_default(),
+                    s["description"].as_str().unwrap_or_default()
+                ));
+                if has_gold_tokens(&meta, &gold) {
+                    sn = true;
+                    rt = true;
+                }
+                let md = s["markdown"].as_str().unwrap_or_default();
+                if md.is_empty() {
+                    empty_md += 1;
+                    continue;
+                }
+                let nm = norm(md);
+                if has_gold(&nm, &gold) {
+                    rs = true;
+                    if let Some(o) = nm.find(&gold) {
+                        let f = o as f64 / nm.len().max(1) as f64;
+                        best_frac = Some(best_frac.map_or(f, |p: f64| p.min(f)));
+                    }
+                }
+                if has_gold_tokens(&nm, &gold) {
+                    rt = true;
+                }
+                if has_gold_tokens(&norm(truncate_on_char_boundary(md, budget)), &gold) {
+                    h = true;
+                }
+                if has_gold_tokens(&norm(&select_relevant_passages(md, q, budget)), &gold) {
+                    b = true;
+                }
+            }
+            if rs {
+                ret_s += 1;
+            }
+            if rt {
+                ret_t += 1;
+            }
+            if h {
+                head_t += 1;
+            }
+            if b || sn {
+                bm25_t += 1;
+            }
+            if sn {
+                snip_t += 1;
+            }
+            if empty_md == sources.len() && !sources.is_empty() {
+                no_md += 1;
+            }
+
+            if rt && !(b || sn) {
+                lost.push(format!(
+                    "  [{}] depth~{}% gold={:?}\n      q: {}",
+                    row["i"].as_i64().unwrap_or(-1),
+                    best_frac.map_or("?".into(), |f| format!("{:.0}", f * 100.0)),
+                    row["gold"].as_str().unwrap_or_default(),
+                    q
+                ));
+            }
+            if !rt {
+                let urls: Vec<String> = sources
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "{} ({}b)",
+                            s["url"].as_str().unwrap_or_default(),
+                            s["markdown"].as_str().unwrap_or_default().len()
+                        )
+                    })
+                    .collect();
+                missed.push(format!(
+                    "  [{}] gold={:?}\n      q: {}\n      {}",
+                    row["i"].as_i64().unwrap_or(-1),
+                    row["gold"].as_str().unwrap_or_default(),
+                    q,
+                    urls.join("\n      ")
+                ));
+            }
+        }
+
+        let pct = |x: usize| 100.0 * x as f64 / n.max(1) as f64;
+        println!("\n=== recall@budget  (budget {budget} chars/source, n={n}) ===");
+        println!(
+            "RETRIEVAL ceiling, strict phrase   : {ret_s:3} ({:5.1}%)",
+            pct(ret_s)
+        );
+        println!(
+            "RETRIEVAL ceiling, all-tokens      : {ret_t:3} ({:5.1}%)  <- the real ceiling",
+            pct(ret_t)
+        );
+        println!("  of which answerable from snippet : {snip_t:3}");
+        println!(
+            "survives head-truncation           : {head_t:3} ({:5.1}%)",
+            pct(head_t)
+        );
+        println!(
+            "survives BM25 selection (+snippet) : {bm25_t:3} ({:5.1}%)  <- what the LLM sees",
+            pct(bm25_t)
+        );
+        println!(
+            "SELECTION loss (had it, dropped)   : {:3}",
+            ret_t.saturating_sub(bm25_t)
+        );
+        println!(
+            "RETRIEVAL loss (never had it)      : {:3} ({:5.1}%)",
+            n - ret_t,
+            pct(n - ret_t)
+        );
+        println!("questions with zero scraped md     : {no_md:3}");
+        if !lost.is_empty() {
+            println!("\n--- dropped by SELECTION (fixable in the window) ---");
+            for l in &lost {
+                println!("{l}");
+            }
+        }
+        if !missed.is_empty() {
+            println!("\n--- never RETRIEVED (search/scrape problem) ---");
+            for l in &missed {
+                println!("{l}");
+            }
+        }
+    }
 }
