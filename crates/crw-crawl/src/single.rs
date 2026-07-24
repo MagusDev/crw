@@ -402,8 +402,19 @@ async fn scrape_url_inner(
 
         let escalate_for_quality =
             !md_is_byte_thin && md_is_low_quality && fetch_result.html.len() > 5000;
+        // A request whose JS ladder already failed comes back as an HTTP body
+        // carrying the `js_escalation_failed:` warning. It looks exactly like a
+        // low-tier result, so without this check we would re-run the whole
+        // ladder that was just exhausted — a second HTTP fetch, a second full JS
+        // attempt and a second extraction, on the same (already spent) deadline,
+        // for a result that cannot differ.
+        let js_ladder_exhausted = fetch_result
+            .warning
+            .as_deref()
+            .is_some_and(|w| w.contains(crw_renderer::JS_ESCALATION_FAILED));
         let should_escalate = (md_is_byte_thin || escalate_for_quality)
             && used_low_tier
+            && !js_ladder_exhausted
             && should_escalate_status
             && escalation_eligible;
         if should_escalate {
@@ -700,6 +711,27 @@ async fn scrape_url_inner(
     // instead of mistaking it for a thin page.
     data.truncated = fetch_result.truncated;
 
+    // ...but a truncated render that extracted to NOTHING is not incomplete
+    // content, it is no content. The navigation budget expired mid-load and the
+    // partial DOM held nothing extractable, so a 200 here bills the caller for a
+    // blank document and reads as "this page is empty" when the truth is "we ran
+    // out of time" — two states the caller cannot tell apart, and only one of
+    // which they can fix (by raising `timeout`). Measured on prod 2026-07-24:
+    // 4 of 26 truncated scrapes shipped 0 bytes as a billed success.
+    //
+    // Scoped deliberately: only when markdown was ASKED FOR (a `rawHtml`/`links`
+    // caller can still use a partial DOM) and only when it is entirely empty.
+    // A thin-but-present body stays a success — that is a judgment call about
+    // quality, not a missing answer, and taking it would risk recall.
+    if is_empty_truncated_render(data.truncated, &req.formats, data.markdown.as_deref()) {
+        tracing::warn!(
+            url = %req.url,
+            elapsed_ms = fetch_result.elapsed_ms,
+            "render budget expired with no extractable content; failing instead of billing an empty page"
+        );
+        return Err(crw_core::error::CrwError::Timeout(fetch_result.elapsed_ms));
+    }
+
     // Wrap the raw base64 screenshot in a `data:image/png;base64,` URL exactly
     // once, here, so both v1 and v2 responses are identical (D8). FetchResult
     // keeps the raw b64.
@@ -900,13 +932,37 @@ fn redirect_is_material(requested: &str, final_url: &str) -> bool {
     !req_path.is_empty() && fin_path.is_empty()
 }
 
+/// A truncated render that extracted to nothing: the render budget expired
+/// mid-load and the partial DOM held no markdown. See the call site for why
+/// that is a failure rather than an empty page.
+fn is_empty_truncated_render(
+    truncated: bool,
+    formats: &[OutputFormat],
+    markdown: Option<&str>,
+) -> bool {
+    truncated
+        && formats.contains(&OutputFormat::Markdown)
+        && markdown.map(|m| m.trim().is_empty()).unwrap_or(true)
+}
+
 pub(crate) fn derive_target_warning(fetch_result: &FetchResult) -> Option<String> {
     // Anti-bot detection wins over any other warning. The renderer chain
     // annotates thin results with "X returned a loading placeholder", but the
     // underlying HTML may be a CAPTCHA shell — surfacing the placeholder
     // misattributes the failure to our renderer instead of the site block.
     if let Some(block) = detect_block_interstitial(&fetch_result.html) {
-        return Some(block);
+        // Exception: a `js_escalation_failed:` prefix explains WHY the caller is
+        // looking at an HTTP shell at all, and a block page is the single most
+        // likely body to be holding one. Dropping it here would leave a
+        // `renderJs:true` caller with "Blocked by …" and no way to tell the
+        // browser tier ran and lost — which is exactly what the docs tell them
+        // to look for. Keep both, block first.
+        return Some(match fetch_result.warning.as_deref() {
+            Some(w) if w.starts_with(crw_renderer::JS_ESCALATION_FAILED) => {
+                format!("{block}; {w}")
+            }
+            _ => block,
+        });
     }
 
     if fetch_result.warning.is_some() {
@@ -1436,6 +1492,46 @@ mod tests {
             "<html><title>Just a moment</title><body>cf-browser-verification</body></html>",
         ));
         assert_eq!(warning.as_deref(), Some("Blocked by anti-bot protection"));
+    }
+
+    #[test]
+    fn empty_truncated_render_is_a_failure_not_an_empty_page() {
+        let md = [OutputFormat::Markdown];
+        // The billed-blank-page case: budget expired, nothing extracted.
+        assert!(is_empty_truncated_render(true, &md, None));
+        assert!(is_empty_truncated_render(true, &md, Some("   \n ")));
+        // A thin-but-present body is a quality judgment, not a missing answer —
+        // failing it would cost recall.
+        assert!(!is_empty_truncated_render(true, &md, Some("# Title")));
+        // An empty page that rendered fully is genuinely empty; say so.
+        assert!(!is_empty_truncated_render(false, &md, None));
+        // A caller who wanted raw HTML can still use a partial DOM.
+        assert!(!is_empty_truncated_render(
+            true,
+            &[OutputFormat::RawHtml],
+            None
+        ));
+    }
+
+    #[test]
+    fn warning_keeps_js_escalation_failure_alongside_a_block() {
+        // A block page is the likeliest body to be holding a failed-ladder
+        // explanation, and the docs tell callers to look for that prefix. The
+        // block marker used to short-circuit and drop it.
+        let mut fetch = sample_fetch(
+            200,
+            "<html><title>Just a moment</title><body>cf-browser-verification</body></html>",
+        );
+        fetch.warning = Some(format!(
+            "{} Timeout after 5000ms",
+            crw_renderer::JS_ESCALATION_FAILED
+        ));
+        let warning = derive_target_warning(&fetch).expect("both signals expected");
+        assert!(
+            warning.contains("Blocked by anti-bot protection"),
+            "{warning}"
+        );
+        assert!(warning.contains("js_escalation_failed"), "{warning}");
     }
 
     #[test]

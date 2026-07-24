@@ -1718,14 +1718,14 @@ impl CdpRenderer {
             rendered_with: Some(self.name.clone()),
             elapsed_ms: start.elapsed().as_millis() as u64,
             warning: if truncated {
-                Some("chrome_budget_truncated".to_string())
+                Some(self.budget_truncated_warning())
             } else {
                 None
             },
             render_decision: None,
             credit_cost: 0,
             warnings: if truncated {
-                vec!["chrome_budget_truncated".to_string()]
+                vec![self.budget_truncated_warning()]
             } else {
                 Vec::new()
             },
@@ -1734,6 +1734,16 @@ impl CdpRenderer {
             captured_responses,
             screenshot,
         })
+    }
+
+    /// Name the tier that actually ran out of budget. This struct drives every
+    /// CDP-speaking renderer, so the hardcoded `chrome_budget_truncated` blamed
+    /// Chrome for LightPanda's much smaller budget — prod, 2026-07-24: every
+    /// truncation sampled was LightPanda's, reported as Chrome's, sending anyone
+    /// debugging it to the wrong tier. Chrome's string is unchanged, so existing
+    /// consumers see no difference.
+    fn budget_truncated_warning(&self) -> String {
+        format!("{}_budget_truncated", self.name)
     }
 
     /// Inner fetch with WebSocket lifecycle management.
@@ -1887,14 +1897,14 @@ impl CdpRenderer {
             rendered_with: Some(self.name.clone()),
             elapsed_ms: start.elapsed().as_millis() as u64,
             warning: if truncated {
-                Some("chrome_budget_truncated".to_string())
+                Some(self.budget_truncated_warning())
             } else {
                 None
             },
             render_decision: None,
             credit_cost: 0,
             warnings: if truncated {
-                vec!["chrome_budget_truncated".to_string()]
+                vec![self.budget_truncated_warning()]
             } else {
                 Vec::new()
             },
@@ -2988,6 +2998,17 @@ mod tests {
         lightpanda_safe_ua, screenshot_clip, split_caller_headers,
     };
     use std::collections::HashMap;
+
+    #[test]
+    fn budget_truncated_warning_names_the_tier_that_ran_out() {
+        // One struct drives every CDP tier, so a hardcoded string reported
+        // LightPanda's truncation as Chrome's and sent debuggers to the wrong
+        // renderer. Chrome's wording is unchanged for existing consumers.
+        let chrome = CdpRenderer::new("chrome", "ws://x/", 1000, 1);
+        let lp = CdpRenderer::new("lightpanda", "ws://x/", 1000, 1);
+        assert_eq!(chrome.budget_truncated_warning(), "chrome_budget_truncated");
+        assert_eq!(lp.budget_truncated_warning(), "lightpanda_budget_truncated");
+    }
 
     #[test]
     fn proxy_tunnel_error_matches_connect_failures() {

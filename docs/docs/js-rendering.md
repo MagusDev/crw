@@ -295,6 +295,7 @@ When rendered output looks wrong, check:
 
 - **Empty content from JS-heavy sites**: Increase `waitFor` (e.g., `3000`-`5000`). Some SPAs need extra time to hydrate.
 - **`renderedWith: "http_only_fallback"` in metadata**: JS rendering was requested but no renderer is available. Check your deployment configuration.
+- **`renderedWith: "http"` plus a `js_escalation_failed:` warning**: a renderer was configured and attempted, but every tier failed. The HTTP body is returned instead of an error so the request still yields content. The usual cause is a `timeout` too short for a browser — a cold Chrome navigation can take 15s or more on a heavy page.
 - **Internal error on `renderJs: true`**: Verify the LightPanda sidecar is running and reachable. Check `/health` for renderer status.
 - **Still poor output after increasing `waitFor`**: The issue may be anti-bot protection or authentication flow, not rendering delay.
 

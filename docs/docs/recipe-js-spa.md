@@ -282,7 +282,13 @@ else:
 ## Troubleshooting
 
 **`renderedWith` is `"http"` even with `renderJs: true`**
-No JS renderer is configured. Check your deployment or use the cloud endpoint (`https://api.fastcrw.com`).
+Check `warning`. If it starts with `js_escalation_failed:`, a renderer was
+configured and tried but every tier failed (usually the deadline was too short
+for a browser — raise `timeout`); the HTTP body is returned rather than an error
+so you still get content. A PDF also legitimately reports `"http"`, because
+there is no DOM to render. If `renderedWith` is `"http_only_fallback"` instead,
+no JS renderer is configured at all: check your deployment or use the cloud
+endpoint (`https://api.fastcrw.com`).
 
 **Markdown is still empty after rendering**
 The page may be behind an anti-bot wall. Look for a `warnings` array in the response — it will name the vendor (Cloudflare, Akamai, etc.). Switch to `renderer: "chrome_proxy"` with a `country` code to route through a residential IP.
