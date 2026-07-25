@@ -979,7 +979,20 @@ fn redirect_is_material(requested: &str, final_url: &str) -> bool {
 /// Cloudflare's 520-527 are not IANA-registered; Cloudflare generates them and
 /// an origin does not emit them, which is what makes the status alone a safe
 /// signal (response headers are not available this far up — `PageMetadata`
-/// carries only `status_code`).
+/// carries only `status_code`). The renderer never synthesises a 52x either, so
+/// one arriving here always came off the wire.
+///
+/// Stops at 527 rather than matching the renderer's adjacent `520..=530`
+/// (`lib.rs` `hard_block`) on purpose. That range is the *egress-recoverable*
+/// set, and the two are complements: 520-527 are all origin-side (down,
+/// unreachable, timed out, bad TLS) and no exit IP fixes them, whereas 530 rides
+/// a Cloudflare `1XXX` code that includes firewall denials like 1020 — a real
+/// block, and one a different egress genuinely can clear. Treating 530 as "the
+/// origin is broken" would report our own blocked IP as the customer's site
+/// being down.
+///
+/// This fires on the FINAL stitched result, so a 52x that some later tier
+/// recovered into a real page never reaches it — no recall is at stake.
 ///
 /// This is a status check and NOT a body check on purpose. The scrape routes
 /// already refuse a `>= 400` whose body is under 200 bytes, and that guard is
@@ -1639,7 +1652,10 @@ mod tests {
         }
         // Everything around it must be untouched. 502/503/504 are ordinary
         // gateway statuses that a real origin (or its reverse proxy) does emit,
-        // and a 503 maintenance page can be content the caller wants.
+        // and a 503 maintenance page can be content the caller wants. 530 is
+        // excluded deliberately: it carries a Cloudflare 1XXX code that includes
+        // firewall denials (1020), which is a block on us rather than a broken
+        // origin, and a different egress can clear it — see the doc comment.
         for status in [
             200, 301, 403, 404, 429, 500, 502, 503, 504, 508, 519, 528, 530,
         ] {
