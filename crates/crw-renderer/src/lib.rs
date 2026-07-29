@@ -123,6 +123,58 @@ pub fn render_reserve(pool_size: usize) -> usize {
     }
 }
 
+/// Attach the browser-context pool to a CDP tier, when enabled and supported.
+///
+/// Every pooled tier gets its own pool, sized from the shared
+/// `[renderer.chrome_pool]` block. Beyond amortizing the handshake, the pool is
+/// what puts each render in its own browser context: the legacy path only
+/// builds a context when the request carries its own proxy, so an unpooled tier
+/// opens targets in the *default* context, which cannot be disposed and so
+/// cannot be reaped when a render is cancelled.
+///
+/// Gated off on browserless v2 per plan §"Out of scope". The backend is set
+/// explicitly in config; never URL-sniffed.
+#[cfg(feature = "cdp")]
+fn maybe_with_pool(
+    renderer: cdp::CdpRenderer,
+    config: &crw_core::config::RendererConfig,
+    tier: &'static str,
+) -> cdp::CdpRenderer {
+    if !config.chrome_context_pool_enabled {
+        return renderer;
+    }
+    match config.chrome_backend {
+        crw_core::config::ChromeBackend::Vanilla => {
+            let pcfg = &config.chrome_pool;
+            let size = pcfg.size.unwrap_or_else(|| {
+                let n = std::thread::available_parallelism()
+                    .map(|p| p.get())
+                    .unwrap_or(2);
+                std::cmp::max(2, n / 2)
+            });
+            tracing::info!(tier, pool_size = size, "browser-context pool enabled");
+            renderer.with_pool(browser_pool::PoolCfg {
+                size,
+                recycle_after_navs: pcfg.recycle_after_navs,
+                idle_timeout: std::time::Duration::from_secs(pcfg.idle_timeout_secs),
+                health_check_after: std::time::Duration::from_secs(pcfg.health_check_secs),
+                shutdown_drain: std::time::Duration::from_secs(pcfg.shutdown_drain_secs),
+                close_target_timeout: std::time::Duration::from_secs(2),
+                dispose_ctx_timeout: std::time::Duration::from_secs(1),
+                create_ctx_timeout: std::time::Duration::from_secs(1),
+            })
+        }
+        crw_core::config::ChromeBackend::Browserless => {
+            tracing::warn!(
+                tier,
+                "chrome_context_pool_enabled = true but chrome_backend = browserless — \
+                 pool unsupported on this backend in v1, falling back to legacy path"
+            );
+            renderer
+        }
+    }
+}
+
 /// Whether the named renderer tier can capture a screenshot.
 ///
 /// Screenshot capture is CDP `Page.captureScreenshot` on vanilla Chrome
@@ -585,10 +637,11 @@ pub struct FallbackRenderer {
     /// a client each time. Bounded — cleared past a cap to avoid unbounded
     /// growth under arbitrary BYOP proxies.
     proxy_client_cache: std::sync::Mutex<std::collections::HashMap<String, Arc<dyn PageFetcher>>>,
-    /// Chrome browser-context pool handle for graceful drain on shutdown.
-    /// `None` when the pool is disabled or the chrome tier isn't configured.
+    /// Browser-context pool handles for graceful drain on shutdown, one per
+    /// pooled CDP tier (`chrome`, `chrome_proxy`). Empty when the pool is
+    /// disabled or no CDP tier is configured.
     #[cfg(feature = "cdp")]
-    chrome_pool: Option<Arc<browser_pool::BrowserContextPool<cdp_conn::CdpConnection>>>,
+    chrome_pools: Vec<Arc<browser_pool::BrowserContextPool<cdp_conn::CdpConnection>>>,
     /// Whether the (constructed) camoufox tier participates in the auto ladder
     /// for this instance's mode. Drives the non-pinned pool filter in
     /// `fetch_with_js`: when false, a configured camoufox renderer is reachable
@@ -726,7 +779,7 @@ impl FallbackRenderer {
                 http_timeout_ms,
                 proxy_client_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
                 #[cfg(feature = "cdp")]
-                chrome_pool: None,
+                chrome_pools: Vec::new(),
                 // mode=none constructs no renderers, so camoufox is never in
                 // the (empty) ladder.
                 #[cfg(feature = "camoufox")]
@@ -740,9 +793,9 @@ impl FallbackRenderer {
         }
 
         #[cfg(feature = "cdp")]
-        let mut chrome_pool: Option<
+        let mut chrome_pools: Vec<
             Arc<browser_pool::BrowserContextPool<cdp_conn::CdpConnection>>,
-        > = None;
+        > = Vec::new();
 
         #[cfg(feature = "cdp")]
         {
@@ -819,50 +872,8 @@ impl FallbackRenderer {
                         config.chrome_host_intercept_disable.clone(),
                     );
 
-                    // Browser-context pool: gated off on browserless v2 in v1
-                    // per plan §"Out of scope". The backend is set explicitly
-                    // in config; never URL-sniffed.
-                    if config.chrome_context_pool_enabled {
-                        match config.chrome_backend {
-                            crw_core::config::ChromeBackend::Vanilla => {
-                                let pcfg = &config.chrome_pool;
-                                let size = pcfg.size.unwrap_or_else(|| {
-                                    let n = std::thread::available_parallelism()
-                                        .map(|p| p.get())
-                                        .unwrap_or(2);
-                                    std::cmp::max(2, n / 2)
-                                });
-                                renderer = renderer.with_pool(browser_pool::PoolCfg {
-                                    size,
-                                    recycle_after_navs: pcfg.recycle_after_navs,
-                                    idle_timeout: std::time::Duration::from_secs(
-                                        pcfg.idle_timeout_secs,
-                                    ),
-                                    health_check_after: std::time::Duration::from_secs(
-                                        pcfg.health_check_secs,
-                                    ),
-                                    shutdown_drain: std::time::Duration::from_secs(
-                                        pcfg.shutdown_drain_secs,
-                                    ),
-                                    close_target_timeout: std::time::Duration::from_secs(2),
-                                    dispose_ctx_timeout: std::time::Duration::from_secs(1),
-                                    create_ctx_timeout: std::time::Duration::from_secs(1),
-                                });
-                                tracing::info!(
-                                    pool_size = size,
-                                    "chrome browser-context pool enabled"
-                                );
-                            }
-                            crw_core::config::ChromeBackend::Browserless => {
-                                tracing::warn!(
-                                    "chrome_context_pool_enabled = true but \
-                                     chrome_backend = browserless — pool unsupported on \
-                                     this backend in v1, falling back to legacy path"
-                                );
-                            }
-                        }
-                    }
-                    chrome_pool = renderer.pool();
+                    renderer = maybe_with_pool(renderer, config, "chrome");
+                    chrome_pools.extend(renderer.pool());
                     js_renderers.push(Arc::new(renderer));
                 } else if matches!(config.mode, RendererMode::Chrome) {
                     return Err(CrwError::ConfigError(
@@ -925,6 +936,16 @@ impl FallbackRenderer {
                         default_country = ?config.proxy_default_country,
                         "chrome_proxy tier enabled"
                     );
+                    // Same browser-context pool as the chrome tier. Without it
+                    // this tier takes the legacy path, and because its egress
+                    // proxy comes from the container's own `--proxy-server`
+                    // (not a per-request one), it never builds a browser
+                    // context — so its targets land in the *default* context,
+                    // which cannot be disposed and therefore cannot be reaped
+                    // when a render is cancelled. Prod, 2026-07-29: chrome held
+                    // 0 stray targets while chrome_proxy held 42.
+                    renderer = maybe_with_pool(renderer, config, "chrome_proxy");
+                    chrome_pools.extend(renderer.pool());
                     js_renderers.push(Arc::new(renderer));
                 }
             }
@@ -1053,7 +1074,7 @@ impl FallbackRenderer {
             http_timeout_ms,
             proxy_client_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
             #[cfg(feature = "cdp")]
-            chrome_pool,
+            chrome_pools,
             // Single source of truth for the opt-in policy: true only when
             // mode=camoufox (pinned) or mode=auto + include_in_auto. A
             // configured-but-not-opted-in endpoint stays out of the auto chain.
@@ -1146,12 +1167,12 @@ impl FallbackRenderer {
         self.pick_proxy(host.as_deref())
     }
 
-    /// Drain the chrome browser-context pool. Idempotent and a no-op when
+    /// Drain every chrome browser-context pool. Idempotent and a no-op when
     /// the pool is disabled. Call from the server's SIGTERM handler after
     /// the HTTP server has finished serving in-flight requests.
     #[cfg(feature = "cdp")]
     pub async fn shutdown_chrome_pool(&self, drain: std::time::Duration) {
-        if let Some(pool) = self.chrome_pool.clone() {
+        for pool in self.chrome_pools.clone() {
             tracing::info!(
                 drain_secs = drain.as_secs(),
                 "draining chrome browser-context pool"
