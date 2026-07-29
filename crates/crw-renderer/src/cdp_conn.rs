@@ -400,10 +400,51 @@ fn dispatch(
     }
 }
 
+/// Params for `Target.createBrowserContext`, shared by both callers (the pool
+/// and the legacy per-request proxy path).
+///
+/// `disposeOnDetach` is the load-bearing bit: targets created via
+/// `Target.createTarget` are owned by the *browser*, not the CDP client, so
+/// dropping the WebSocket leaves the renderer process alive forever. Every
+/// explicit cleanup we do (`closeTarget` + `disposeBrowserContext`) is
+/// best-effort and is skipped outright when the future is cancelled mid-fetch
+/// — a timeout, a lost hedge race, a client disconnect — which is exactly when
+/// cleanup matters most. With this flag Chrome disposes the context itself the
+/// moment the session disconnects, closing every page in it without running
+/// beforeunload. That makes the reap unconditional instead of best-effort.
+///
+/// Measured against prod Chrome 150 (2026-07-25): without the flag a dropped
+/// socket left the renderer resident indefinitely; with it the renderer was
+/// gone within seconds.
+pub(crate) fn browser_ctx_params(proxy_server: Option<&str>) -> serde_json::Value {
+    let mut v = serde_json::json!({ "disposeOnDetach": true });
+    if let Some(p) = proxy_server {
+        // No proxyBypassList: Chrome bypasses loopback by default, which is
+        // what we want (don't route localhost via proxy).
+        v["proxyServer"] = serde_json::Value::String(p.to_string());
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
+
+    /// Guards the leak fix: both createBrowserContext callers must ask Chrome
+    /// to dispose the context on disconnect, with or without a proxy. Dropping
+    /// this flag silently reintroduces the orphaned-renderer leak, which only
+    /// shows up hours later as leaked chrome processes on the host.
+    #[test]
+    fn browser_ctx_params_always_dispose_on_detach() {
+        let plain = browser_ctx_params(None);
+        assert_eq!(plain["disposeOnDetach"], true);
+        assert!(plain.get("proxyServer").is_none());
+
+        let proxied = browser_ctx_params(Some("http://gw.example:823"));
+        assert_eq!(proxied["disposeOnDetach"], true);
+        assert_eq!(proxied["proxyServer"], "http://gw.example:823");
+    }
 
     fn parse(json: &str) -> RawCdpMessage {
         serde_json::from_str(json).expect("valid RawCdpMessage")

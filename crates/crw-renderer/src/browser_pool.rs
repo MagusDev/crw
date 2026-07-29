@@ -46,7 +46,7 @@ impl ChromeConnOps for CdpConnection {
         let v = self
             .send_recv(
                 "Target.createBrowserContext",
-                json!({}),
+                crate::cdp_conn::browser_ctx_params(None),
                 None,
                 Duration::from_secs(2),
             )

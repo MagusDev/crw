@@ -1794,9 +1794,7 @@ impl CdpRenderer {
                     let v = conn
                         .send_recv(
                             "Target.createBrowserContext",
-                            // No proxyBypassList: Chrome bypasses loopback by default,
-                            // which is what we want (don't route localhost via proxy).
-                            serde_json::json!({ "proxyServer": entry.chrome_proxy_server() }),
+                            crate::cdp_conn::browser_ctx_params(Some(entry.chrome_proxy_server())),
                             None,
                             Duration::from_secs(2),
                         )
