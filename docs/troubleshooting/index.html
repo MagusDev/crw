@@ -329,6 +329,16 @@ print(result[&quot;markdown&quot;][:300])</code></pre>
 <h2 id="2-anti-bot-block-cloudflare-challenge-page">2. Anti-bot block / Cloudflare challenge page</h2>
 <p><strong>Symptom:</strong> Response contains <code>success: false</code>, <code>error_code: &quot;anti_bot&quot;</code>, and the error message names the protection class (e.g., <code>&quot;Blocked by anti-bot (cloudflare): ...&quot;</code> or <code>&quot;Blocked by anti-bot (datadome): ...&quot;</code>).</p>
 <p><strong>Cause:</strong> The target site fingerprints the request as non-browser traffic. Common triggers: missing <code>User-Agent</code>, no <code>Sec-Fetch-*</code> headers, a datacenter IP, or a detectable headless browser.</p>
+<blockquote>
+<p><strong>Not a block: <code>&quot;No usable content could be extracted (...)&quot;</code>.</strong> The same
+<code>error_code: &quot;anti_bot&quot;</code> also covers the case where we fetched the page fine
+but it held nothing usable — a handful of visible characters, no content
+elements. That is usually a broken TLS certificate serving an error stub, a
+parked domain, or a JS shell that never hydrated. The staged anti-bot fixes
+below will not help it. Check the URL in a browser first; if it renders a real
+page there, raise <code>waitFor</code> or try <code>renderJs: true</code>. Either way you are not
+charged for it.</p>
+</blockquote>
 <p><strong>Fix (staged):</strong></p>
 <ol>
 <li>Add <code>&quot;stealth&quot;: true</code> to route through randomized headers and a pooled real-browser UA.</li>
