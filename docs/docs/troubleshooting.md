@@ -65,6 +65,15 @@ print(result["markdown"][:300])
 
 **Cause:** The target site fingerprints the request as non-browser traffic. Common triggers: missing `User-Agent`, no `Sec-Fetch-*` headers, a datacenter IP, or a detectable headless browser.
 
+> **Not a block: `"No usable content could be extracted (...)"`.** The same
+> `error_code: "anti_bot"` also covers the case where we fetched the page fine
+> but it held nothing usable — a handful of visible characters, no content
+> elements. That is usually a broken TLS certificate serving an error stub, a
+> parked domain, or a JS shell that never hydrated. The staged anti-bot fixes
+> below will not help it. Check the URL in a browser first; if it renders a real
+> page there, raise `waitFor` or try `renderJs: true`. Either way you are not
+> charged for it.
+
 **Fix (staged):**
 
 1. Add `"stealth": true` to route through randomized headers and a pooled real-browser UA.
