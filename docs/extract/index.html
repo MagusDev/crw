@@ -448,7 +448,7 @@ console.log(body.data.json);</code></pre></div><div class="code-tab-panel" data-
 <td><code>llmProvider</code></td>
 <td>string</td>
 <td>server default</td>
-<td><code>anthropic</code>, <code>openai</code>, <code>deepseek</code>, <code>azure</code>, or <code>openai-compatible</code></td>
+<td><code>anthropic</code>, <code>openai</code>, <code>openai-responses</code>, <code>deepseek</code>, <code>azure</code>, or <code>openai-compatible</code></td>
 </tr>
 <tr>
 <td><code>llmModel</code></td>
@@ -460,7 +460,7 @@ console.log(body.data.json);</code></pre></div><div class="code-tab-panel" data-
 <td><code>baseUrl</code></td>
 <td>string</td>
 <td>--</td>
-<td>OpenAI-compatible endpoint base, e.g. <code>https://api.deepseek.com/v1</code> (also used by Azure). crw appends <code>/chat/completions</code> automatically if you omit it.</td>
+<td>Provider endpoint base. CRW appends <code>/chat/completions</code> for Chat Completions providers or <code>/responses</code> for <code>openai-responses</code>; complete endpoint URLs are accepted.</td>
 </tr>
 <tr>
 <td><code>onlyMainContent</code></td>
@@ -499,7 +499,7 @@ console.log(body.data.json);</code></pre></div><div class="code-tab-panel" data-
 </ol>
 <p>If the underlying page scrape is weak, the JSON extraction will also be weak.</p>
 <h2 id="self-hosted-llm-and-provider-control">Self-hosted LLM and provider control</h2>
-<p><strong>Self-hosted:</strong> set <code>[extraction.llm]</code> in <code>config.toml</code> for a server-wide default, or pass <code>llmApiKey</code> + <code>llmProvider</code> + <code>llmModel</code> per request to override it. Supported providers: <code>anthropic</code>, <code>openai</code>, <code>deepseek</code>, <code>azure</code>, and <code>openai-compatible</code>. Use <code>baseUrl</code> for any OpenAI-compatible endpoint (DeepSeek, Azure, local models).</p>
+<p><strong>Self-hosted:</strong> set <code>[extraction.llm]</code> in <code>config.toml</code> for a server-wide default, or pass <code>llmApiKey</code> + <code>llmProvider</code> + <code>llmModel</code> per request to override it. Supported providers: <code>anthropic</code>, <code>openai</code>, <code>openai-responses</code>, <code>deepseek</code>, <code>azure</code>, and <code>openai-compatible</code>. Use <code>baseUrl</code> for compatible Chat Completions or Responses endpoints.</p>
 <h2 id="common-production-patterns">Common production patterns</h2>
 <ul>
 <li>Validate the target with markdown first, then add extraction.</li>

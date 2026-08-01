@@ -514,7 +514,7 @@ console.log(body.data.markdown);</code></pre></div><div class="code-tab-panel" d
 <td><code>llmProvider</code></td>
 <td>string</td>
 <td>server default</td>
-<td><code>anthropic</code>, <code>openai</code>, <code>deepseek</code>, <code>azure</code>, or <code>openai-compatible</code></td>
+<td><code>anthropic</code>, <code>openai</code>, <code>openai-responses</code>, <code>deepseek</code>, <code>azure</code>, or <code>openai-compatible</code></td>
 </tr>
 <tr>
 <td><code>llmModel</code></td>
@@ -526,7 +526,7 @@ console.log(body.data.markdown);</code></pre></div><div class="code-tab-panel" d
 <td><code>baseUrl</code></td>
 <td>string</td>
 <td>--</td>
-<td>OpenAI-compatible endpoint base, e.g. <code>https://api.deepseek.com/v1</code> (also used by Azure). crw appends <code>/chat/completions</code> automatically if you omit it.</td>
+<td>Provider endpoint base. CRW appends <code>/chat/completions</code> for Chat Completions providers or <code>/responses</code> for <code>openai-responses</code>; complete endpoint URLs are accepted.</td>
 </tr>
 <tr>
 <td><code>summaryPrompt</code></td>

@@ -470,17 +470,24 @@ crw search "renewable energy trends 2024" --json --fields title,url,snippet --li
 <td><code>tool_use</code> with <code>input_schema</code></td>
 </tr>
 <tr>
-<td>OpenAI</td>
-<td>Function calling with <code>parameters</code></td>
+<td>OpenAI / OpenAI-compatible</td>
+<td>Chat Completions function calling with <code>parameters</code></td>
+</tr>
+<tr>
+<td>OpenAI Responses-compatible</td>
+<td>Forced Responses function call; arguments are validated locally</td>
 </tr>
 </tbody></table>
 <p>Configure in <code>config.toml</code>:</p>
 <pre data-lang="toml"><code class="language-toml">[extraction.llm]
-provider = &quot;anthropic&quot;          # or &quot;openai&quot;
+provider = &quot;anthropic&quot;          # or &quot;openai&quot;, &quot;openai-responses&quot;, …
 api_key = &quot;sk-...&quot;
 model = &quot;claude-sonnet-4-20250514&quot;
 max_tokens = 4096
-# base_url = &quot;https://...&quot;     # for OpenAI-compatible endpoints</code></pre>
+# base_url = &quot;https://...&quot;     # for compatible Chat or Responses endpoints</code></pre>
+<p>For a Responses-compatible endpoint, set <code>provider = &quot;openai-responses&quot;</code> and
+use a versioned HTTPS API base such as <code>https://gateway.example.com/v1</code>. CRW
+appends <code>/responses</code>; a complete endpoint URL is also accepted unchanged.</p>
 <h2 id="response-shape">Response Shape</h2>
 <p>Each format populates a corresponding field in the response <code>data</code> object:</p>
 <table>
@@ -728,7 +735,7 @@ max_tokens = 4096
 <tr>
 <td><code>provider</code></td>
 <td><code>string</code></td>
-<td><code>anthropic</code> / <code>openai</code> / <code>azure</code> / <code>openai-compatible</code></td>
+<td><code>anthropic</code> / <code>openai</code> / <code>openai-responses</code> / <code>deepseek</code> / <code>azure</code> / <code>openai-compatible</code></td>
 </tr>
 </tbody></table>
 <h3 id="chunkresult-object"><code>ChunkResult</code> object</h3>
