@@ -28,6 +28,7 @@ fn extract_markdown_format() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -71,6 +72,7 @@ fn extract_images_format_populates_from_raw_html() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -118,6 +120,7 @@ fn extract_all_formats() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -164,6 +167,7 @@ fn extract_metadata_populated() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -198,6 +202,7 @@ fn extract_empty_html() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -234,6 +239,7 @@ fn extract_with_include_exclude_tags() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -277,6 +283,7 @@ fn prepends_metadata_title_when_missing_from_markdown() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -318,6 +325,7 @@ fn does_not_duplicate_title_already_in_markdown() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -361,6 +369,7 @@ fn strips_site_name_suffix_from_title_when_prepending() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -412,6 +421,7 @@ fn preserves_en_dash_inside_title_parentheses() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -459,6 +469,7 @@ fn does_not_prepend_title_when_css_selector_provided() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -508,6 +519,7 @@ fn prepends_title_when_only_domain_selector_applies() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 
@@ -558,6 +570,7 @@ fn extract_markdown(
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap()
 }
@@ -707,6 +720,7 @@ fn elementor_page_with_duplicated_nav_extracts_cleanly() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
 

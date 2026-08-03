@@ -44,6 +44,10 @@ pub struct CrawlOptions<'a> {
     /// Cap on concurrent in-flight requests per eTLD+1 host. `1` enforces
     /// strict politeness; raise via config when scraping owned infrastructure.
     pub per_host_max_concurrent: u32,
+    /// From `ExtractionConfig::normalize_tables`. Threaded here so a crawl and
+    /// a single scrape of the same URL produce the same markdown; leaving it
+    /// hardcoded would silently diverge the two paths once the flag is flipped.
+    pub normalize_tables: bool,
 }
 
 /// Validate that a URL is safe to fetch (scheme + host check).
@@ -119,6 +123,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
         jitter_factor: _,
         deadline_ms_per_page,
         per_host_max_concurrent,
+        normalize_tables,
     } = opts;
 
     let max_depth = req.max_depth.unwrap_or(2).min(10);
@@ -370,6 +375,7 @@ async fn run_crawl_inner(opts: CrawlOptions<'_>) {
                 captured_responses: fetch_result.captured_responses.clone(),
                 debug: false,
                 debug_sink: None,
+                normalize_tables,
             })
             .await
             {

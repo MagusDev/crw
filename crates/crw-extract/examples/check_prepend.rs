@@ -33,6 +33,7 @@ fn main() {
         llm_fallback: None,
         debug: false,
         debug_sink: None,
+        normalize_tables: false,
     })
     .unwrap();
     let md = data.markdown.unwrap();

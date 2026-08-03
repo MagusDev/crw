@@ -181,6 +181,10 @@ pub async fn run(mut args: CrawlArgs) -> Result<(), CmdError> {
         jitter_factor: 0.2,
         deadline_ms_per_page: args.timeout,
         per_host_max_concurrent: 1,
+        normalize_tables: crw_core::config::AppConfig::load()
+            .unwrap_or_default()
+            .extraction
+            .normalize_tables,
     };
 
     let crawl_handle = tokio::spawn(async move {

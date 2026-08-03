@@ -475,6 +475,7 @@ impl AppState {
         let jitter_factor = self.config.crawler.stealth.jitter_factor;
         let deadline_ms_per_page = self.config.effective_deadline_ms(None, req.wait_for);
         let per_host_max_concurrent = self.config.crawler.per_host_max_concurrent;
+        let normalize_tables = self.config.extraction.normalize_tables;
 
         let handle = tokio::spawn(async move {
             let _permit = match crawl_semaphore.acquire().await {
@@ -512,6 +513,7 @@ impl AppState {
                         jitter_factor,
                         deadline_ms_per_page,
                         per_host_max_concurrent,
+                        normalize_tables,
                     })
                     .await;
                 })

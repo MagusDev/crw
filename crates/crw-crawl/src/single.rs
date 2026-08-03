@@ -285,6 +285,7 @@ async fn scrape_url_inner(
             captured_responses: fr.captured_responses.clone(),
             debug,
             debug_sink: sink,
+            normalize_tables: extraction_cfg.normalize_tables,
         }
     }
     // ── PDF document branch ────────────────────────────────────────────────

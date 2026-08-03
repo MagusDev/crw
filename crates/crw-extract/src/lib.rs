@@ -27,6 +27,7 @@ pub mod readability;
 mod responses;
 pub mod selector;
 pub mod structured;
+pub mod table_normalize;
 pub mod tables;
 pub mod untrusted;
 
@@ -142,6 +143,9 @@ pub struct ExtractOptions<'a> {
     /// Sink for debug attempts. Shared across the multi-attempt
     /// JS-escalation loop so that all attempts land in one trace.
     pub debug_sink: Option<Arc<Mutex<DebugCollector>>>,
+    /// Expand table `rowspan`/`colspan` into a flat grid before markdown
+    /// conversion. From `ExtractionConfig::normalize_tables`; ships false.
+    pub normalize_tables: bool,
 }
 
 /// Owned counterpart to [`ExtractOptions`], used to ship an extraction job
@@ -178,6 +182,7 @@ pub struct OwnedExtractInput {
     pub captured_responses: Vec<CapturedNetworkResponse>,
     pub debug: bool,
     pub debug_sink: Option<Arc<Mutex<DebugCollector>>>,
+    pub normalize_tables: bool,
 }
 
 impl OwnedExtractInput {
@@ -211,6 +216,7 @@ impl OwnedExtractInput {
             llm_fallback: None,
             debug: self.debug,
             debug_sink: self.debug_sink.clone(),
+            normalize_tables: self.normalize_tables,
         }
     }
 }
@@ -409,6 +415,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         llm_fallback: _,
         debug: _,
         debug_sink: _,
+        normalize_tables,
     } = opts;
 
     // Per-host fallback selector — used only when the caller didn't pass an
@@ -498,7 +505,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
         || formats.contains(&OutputFormat::Json)
         || formats.contains(&OutputFormat::Summary)
     {
-        let primary_md = markdown::html_to_markdown(&content_html);
+        let primary_md = markdown::html_to_markdown_with(&content_html, normalize_tables);
         let primary_quality = quality::analyze_md_only(&primary_md);
 
         // Skip alternates when a selector was explicitly used (short output is
@@ -513,7 +520,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
 
             // Alt 1: cleaned HTML (only_main_content path bypasses readability).
             if only_main_content && let Some(c) = cleaned_ref.as_ref() {
-                let m = markdown::html_to_markdown(c);
+                let m = markdown::html_to_markdown_with(c, normalize_tables);
                 let q = quality::analyze_md_only(&m);
                 candidates.push(("cleaned", m, q));
             }
@@ -536,7 +543,7 @@ pub fn extract(opts: ExtractOptions<'_>) -> CrwResult<ScrapeData> {
                 &mut warnings,
             )
             .unwrap_or_else(|_| raw_html.to_string());
-            let basic_md = markdown::html_to_markdown(&basic_cleaned);
+            let basic_md = markdown::html_to_markdown_with(&basic_cleaned, normalize_tables);
             let basic_q = quality::analyze_md_only(&basic_md);
             candidates.push(("basic_clean", basic_md, basic_q));
 

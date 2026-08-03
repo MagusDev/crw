@@ -4,11 +4,35 @@ use std::collections::hash_map::Entry;
 use std::sync::LazyLock;
 
 /// Convert HTML to Markdown using htmd (turndown.js-inspired converter).
+///
+/// Thin wrapper over [`html_to_markdown_with`] with `normalize = false` —
+/// byte-identical to this function's historical behavior. Existing callers
+/// never need to change to pick up table normalization.
 pub fn html_to_markdown(html: &str) -> String {
-    let md = htmd::convert(html).unwrap_or_default();
+    html_to_markdown_with(html, false)
+}
+
+/// Convert HTML to Markdown, optionally normalizing `<table>` elements first.
+///
+/// `normalize = false` is byte-identical to [`html_to_markdown`] (the revert
+/// guarantee for `ExtractionConfig::normalize_tables`). `normalize = true`
+/// expands `rowspan`/`colspan` into a flat grid (`crate::table_normalize`) and
+/// uses the table-safe indented-code pass so a table nested inside a `<li>`
+/// (indented 4 spaces by htmd) isn't swallowed into a fenced code block.
+pub fn html_to_markdown_with(html: &str, normalize: bool) -> String {
+    let html = if normalize {
+        crate::table_normalize::normalize_tables(html)
+    } else {
+        html.to_string()
+    };
+    let md = htmd::convert(&html).unwrap_or_default();
     let md = strip_anchor_artifacts(&md);
     let md = strip_data_uris(&md);
-    convert_indented_code_to_fenced(&md)
+    if normalize {
+        convert_indented_code_to_fenced_table_safe(&md)
+    } else {
+        convert_indented_code_to_fenced(&md)
+    }
 }
 
 /// One markdown link or image.
@@ -142,6 +166,20 @@ static LIST_ITEM_RE: LazyLock<Regex> =
 /// Convert 4-space indented code blocks to fenced (```) code blocks.
 /// Fenced blocks are unambiguous and easier for RAG pipelines to parse.
 fn convert_indented_code_to_fenced(md: &str) -> String {
+    convert_indented_code_to_fenced_impl(md, false)
+}
+
+/// Table-safe variant of [`convert_indented_code_to_fenced`]: a 4-space
+/// indented line that is a GFM pipe-table row or separator (`| --- |`) is
+/// dedented and passed through as-is instead of being folded into a fenced
+/// code block. htmd indents block content inside a `<li>` by exactly 4 spaces
+/// (`ul_bullet_spacing: 3` + 1), so a table normalized inside a list item
+/// would otherwise come out as a fenced block full of literal pipe text.
+fn convert_indented_code_to_fenced_table_safe(md: &str) -> String {
+    convert_indented_code_to_fenced_impl(md, true)
+}
+
+fn convert_indented_code_to_fenced_impl(md: &str, table_safe: bool) -> String {
     let mut result = String::with_capacity(md.len());
     let mut code_lines: Vec<&str> = Vec::new();
     let mut in_fenced = false;
@@ -150,7 +188,14 @@ fn convert_indented_code_to_fenced(md: &str) -> String {
     let mut after_list_item = false;
     let mut run_continues_list = false;
 
-    for line in md.lines() {
+    let lines: Vec<&str> = md.lines().collect();
+    let table_lines = if table_safe {
+        indented_table_line_flags(&lines)
+    } else {
+        vec![false; lines.len()]
+    };
+
+    for (idx, line) in lines.iter().copied().enumerate() {
         // Track existing fenced code blocks to avoid double-fencing.
         if line.trim_start().starts_with("```") {
             in_fenced = !in_fenced;
@@ -173,6 +218,15 @@ fn convert_indented_code_to_fenced(md: &str) -> String {
         let is_blank = line.trim().is_empty();
 
         if is_code_indent {
+            if table_lines[idx] {
+                if !code_lines.is_empty() {
+                    flush_code_block(&mut result, &mut code_lines, run_continues_list);
+                }
+                result.push_str(dedent_code_indent(line).unwrap_or(line));
+                result.push('\n');
+                continue;
+            }
+
             if code_lines.is_empty() {
                 run_continues_list = after_list_item;
             }
@@ -201,6 +255,63 @@ fn convert_indented_code_to_fenced(md: &str) -> String {
     }
 
     result
+}
+
+/// A GFM pipe-table row (`| a | b |`) — including a separator row
+/// (`| --- | :-: |`), which also starts and ends with `|`.
+fn is_gfm_table_line(line: &str) -> bool {
+    let t = line.trim();
+    t.len() >= 2 && t.starts_with('|') && t.ends_with('|')
+}
+
+/// A GFM header separator row: `|` delimited, made only of dashes, colons,
+/// pipes and spaces, and carrying at least one dash.
+fn is_gfm_separator_line(line: &str) -> bool {
+    let t = line.trim();
+    is_gfm_table_line(t)
+        && t.contains('-')
+        && t[1..t.len() - 1]
+            .chars()
+            .all(|c| matches!(c, '-' | ':' | '|' | ' ' | '\t'))
+}
+
+fn dedent_code_indent(line: &str) -> Option<&str> {
+    line.strip_prefix("    ")
+        .or_else(|| line.strip_prefix('\t'))
+}
+
+/// Mark the indented lines that belong to a real pipe table, so the
+/// indented-code pass can pass them through instead of fencing them.
+///
+/// A run only counts as a table when it has at least two consecutive pipe
+/// lines AND one of them is a header separator. A single pipe-looking line
+/// inside genuine indented code (`    | 0 | 1 |` in an ASCII diagram) would
+/// otherwise split that code block into three pieces.
+fn indented_table_line_flags(lines: &[&str]) -> Vec<bool> {
+    let is_indented_pipe = |line: &str| dedent_code_indent(line).is_some_and(is_gfm_table_line);
+
+    let mut flags = vec![false; lines.len()];
+    let mut i = 0;
+    while i < lines.len() {
+        if !is_indented_pipe(lines[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < lines.len() && is_indented_pipe(lines[i]) {
+            i += 1;
+        }
+        let run = &lines[start..i];
+        if run.len() >= 2
+            && run
+                .iter()
+                .filter_map(|l| dedent_code_indent(l))
+                .any(is_gfm_separator_line)
+        {
+            flags[start..i].fill(true);
+        }
+    }
+    flags
 }
 
 fn flush_code_block(result: &mut String, code_lines: &mut Vec<&str>, continues_list: bool) {
@@ -398,5 +509,65 @@ mod tests {
         let html = r#"<p><a href="https://example.com">Link</a></p>"#;
         let md = html_to_markdown(html);
         assert!(md.contains("[Link](https://example.com)"));
+    }
+
+    #[test]
+    fn table_safe_fence_pass_does_not_fence_indented_pipe_table() {
+        let md = "Intro\n\n    | A | B |\n    | - | - |\n    | 1 | 2 |\n";
+        let out = convert_indented_code_to_fenced_table_safe(md);
+        assert!(!out.contains("```"), "pipe table must not be fenced: {out}");
+        assert!(out.contains("| A | B |"));
+        assert!(out.contains("| 1 | 2 |"));
+    }
+
+    #[test]
+    fn table_safe_fence_pass_still_fences_real_indented_code() {
+        let md = "Intro\n\n    fn main() {\n        println!(\"hi\");\n    }\n";
+        let out = convert_indented_code_to_fenced_table_safe(md);
+        assert!(
+            out.contains("```"),
+            "real indented code must still be fenced: {out}"
+        );
+        assert!(out.contains("fn main()"));
+    }
+
+    /// W2: a single pipe-looking line inside genuine indented code used to be
+    /// passed through, splitting one code block into three pieces.
+    #[test]
+    fn table_safe_fence_pass_keeps_code_with_a_single_pipe_line_intact() {
+        let md = "Intro\n\n    fn render() {\n    | col1 | col2 |\n        draw();\n    }\n";
+        let out = convert_indented_code_to_fenced_table_safe(md);
+        assert_eq!(
+            out.matches("```").count(),
+            2,
+            "code block must stay one piece: {out}"
+        );
+        assert!(out.contains("| col1 | col2 |"), "line lost: {out}");
+        assert!(out.contains("fn render()") && out.contains("draw();"));
+    }
+
+    /// W2 guard: two consecutive pipe lines with no separator row are still
+    /// code, not a table.
+    #[test]
+    fn table_safe_fence_pass_needs_a_separator_row() {
+        let md = "Intro\n\n    | a | b |\n    | c | d |\n";
+        let out = convert_indented_code_to_fenced_table_safe(md);
+        assert!(
+            out.contains("```"),
+            "a pipe run with no separator is not a table: {out}"
+        );
+    }
+
+    #[test]
+    fn legacy_fence_pass_still_fences_indented_pipe_lines() {
+        // The ORIGINAL (non-table-safe) pass is the documented bug this PR
+        // fixes only behind the flag: an indented pipe line is still folded
+        // into a fenced code block when `normalize_tables` is off.
+        let md = "Intro\n\n    | A | B |\n    | - | - |\n    | 1 | 2 |\n";
+        let out = convert_indented_code_to_fenced(md);
+        assert!(
+            out.contains("```"),
+            "legacy path keeps fencing indented pipes: {out}"
+        );
     }
 }

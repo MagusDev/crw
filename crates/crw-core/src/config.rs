@@ -1543,6 +1543,12 @@ pub struct ExtractionConfig {
     /// `max_concurrent_extracts` scales the reserve with it).
     #[serde(default)]
     pub reserved_interactive_extracts: Option<usize>,
+    /// Normalize HTML tables (span expansion, header synthesis, headerless-table promotion) before
+    /// htmd conversion, and stop the indented-code pass from swallowing list-nested tables. Changes
+    /// markdown bytes for any page containing a <table>: this flips /monitor's content hash and can
+    /// reorder the extract alternates ladder on borderline pages. Default false; A/B in prod.
+    #[serde(default)]
+    pub normalize_tables: bool,
 }
 
 fn default_http_retry_threshold() -> usize {
@@ -1572,6 +1578,7 @@ impl Default for ExtractionConfig {
             lightpanda_retry_threshold_bytes: default_lightpanda_retry_threshold(),
             max_concurrent_extracts: default_max_concurrent_extracts(),
             reserved_interactive_extracts: None,
+            normalize_tables: false,
         }
     }
 }
