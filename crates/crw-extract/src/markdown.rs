@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 
 /// Convert HTML to Markdown using htmd (turndown.js-inspired converter).
 ///
-/// Thin wrapper over [`html_to_markdown_with`] with `normalize = false` —
+/// Thin wrapper over [`html_to_markdown_with`] with `normalize = false` ,
 /// byte-identical to this function's historical behavior. Existing callers
 /// never need to change to pick up table normalization.
 pub fn html_to_markdown(html: &str) -> String {
@@ -62,7 +62,7 @@ const MIN_REPEATED_RUN: usize = 2;
 /// table row, a paragraph or a line of code is never touched, however often it
 /// repeats. The first occurrence always survives.
 ///
-/// Applied only when the caller asked for main content — with
+/// Applied only when the caller asked for main content, with
 /// `onlyMainContent: false` they asked for the document as it is.
 pub fn drop_repeated_nav_lines(md: &str) -> String {
     let lines: Vec<&str> = md.lines().collect();
@@ -112,7 +112,7 @@ pub fn drop_repeated_nav_lines(md: &str) -> String {
             .map(|(j, _)| j)
     };
 
-    // Pass 2: drop a repeat only where the whole block genuinely repeated —
+    // Pass 2: drop a repeat only where the whole block genuinely repeated ,
     // at least two entries in a row, in the same order they first appeared.
     // A lone repeat, or two entries that merely happen to sit together now, is
     // a real cross-listing (the same item catalogued under two categories) and
@@ -257,7 +257,7 @@ fn convert_indented_code_to_fenced_impl(md: &str, table_safe: bool) -> String {
     result
 }
 
-/// A GFM pipe-table row (`| a | b |`) — including a separator row
+/// A GFM pipe-table row (`| a | b |`), including a separator row
 /// (`| --- | :-: |`), which also starts and ends with `|`.
 fn is_gfm_table_line(line: &str) -> bool {
     let t = line.trim();
@@ -323,7 +323,7 @@ fn flush_code_block(result: &mut String, code_lines: &mut Vec<&str>, continues_l
     }
 
     // An indented run that continues a list and holds list items is a nested
-    // list, not code. Emit it untouched — fencing it would strip the markers and
+    // list, not code. Emit it untouched, fencing it would strip the markers and
     // destroy the list. Both conditions are needed: a genuine code block can
     // contain a line that looks like a list item, but it will not follow one.
     if continues_list && code_lines.iter().any(|l| LIST_ITEM_RE.is_match(l)) {
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn nested_lists_are_not_fenced_as_code() {
         // htmd indents nested list items by 4 spaces, which used to be read as
-        // an indented code block — every dropdown menu came back as ``` (#365).
+        // an indented code block, every dropdown menu came back as ``` (#365).
         let html = "<ul><li>Company<ul><li><a href=\"/about\">About</a></li>\
                     <li><a href=\"/awards\">Awards</a></li></ul></li></ul>";
         let md = html_to_markdown(html);
@@ -481,7 +481,7 @@ mod tests {
         let b = "*   [Long terms of service link text](https://example.com/terms/)";
         // The same two entries again, one level deeper: a repeated BLOCK, so the
         // run rule alone would drop it. Keyed on the untrimmed line these are
-        // different lines, so the nested copy survives — which is what makes this
+        // different lines, so the nested copy survives, which is what makes this
         // a guard on the key and not just on the run length.
         let input = format!("{a}\n{b}\n    {a}\n    {b}\n");
         let result = drop_repeated_nav_lines(&input);
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn dedup_leaves_code_blocks_alone() {
-        // The lines are eligible in shape — a markdown sample inside a fence —
+        // The lines are eligible in shape, a markdown sample inside a fence ,
         // so the fence tracking is the only thing keeping them.
         let a = "*   [Where to buy our tiles](https://example.com/where-to-buy/)";
         let b = "*   [Exclusive showrooms near you](https://example.com/showrooms/)";

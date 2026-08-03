@@ -63,8 +63,8 @@ fn table_bearing_pages() -> Vec<(&'static str, &'static str)> {
 }
 
 /// Alternates-ladder no-flip. Reproduces the specific gating decision at
-/// `crw-extract/src/lib.rs:572-653` — primary quality score vs. the 0.4
-/// skip-alternates threshold — using the real `quality::analyze_md_only`.
+/// `crw-extract/src/lib.rs:572-653`, primary quality score vs. the 0.4
+/// skip-alternates threshold, using the real `quality::analyze_md_only`.
 /// Table normalization changes the primary candidate's markdown bytes; this
 /// asserts it does not flip which side of the threshold a table-bearing page
 /// lands on for this corpus. Any flip is printed (not silently swallowed) so

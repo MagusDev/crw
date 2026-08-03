@@ -160,7 +160,7 @@ fn fixture_7_table_inside_list_item_not_fenced() {
 }
 
 /// #8: a layout table (`role="presentation"`, nested, 1-col) is left
-/// untouched — same output as today regardless of the flag.
+/// untouched, same output as today regardless of the flag.
 #[test]
 fn fixture_8_layout_table_untouched() {
     let html = r#"<table role="presentation">
@@ -199,7 +199,7 @@ fn fixture_9_nested_table_opaque_no_double_processing() {
 
 /// C1: the thead and body grids were rectangularized independently, so a body
 /// row wider than every header row lost its overflow cells before htmd ever
-/// saw them. No spans involved — plain ragged markup.
+/// saw them. No spans involved, plain ragged markup.
 #[test]
 fn fixture_c1_body_wider_than_header_loses_no_cell() {
     let html = r#"<table>
@@ -303,7 +303,7 @@ fn fixture_c5_colliding_rowspans_stay_linear() {
     let md = html_to_markdown_with(&html, true);
     assert!(
         md.len() < html.len() * 3,
-        "markdown {} bytes from {} bytes of html — quadratic blow-up",
+        "markdown {} bytes from {} bytes of html, quadratic blow-up",
         md.len(),
         html.len()
     );

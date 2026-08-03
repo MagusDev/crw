@@ -20,10 +20,10 @@
 //! - Pass B (`lol_html`, streaming rewrite): splice each top-level table's
 //!   fresh HTML back into the document in place, correlating by document-order
 //!   index rather than string matching (byte-identical duplicate tables would
-//!   collide on a string search). A depth counter — required because
+//!   collide on a string search). A depth counter, required because
 //!   `lol_html` still dispatches the `table` element handler for elements
 //!   inside a subtree already marked for replacement (verified by
-//!   `nested_table_lol_html_handler_fires_but_is_a_noop` below) — makes sure
+//!   `nested_table_lol_html_handler_fires_but_is_a_noop` below), makes sure
 //!   only depth-0 tables are ever replaced; nested tables are always no-ops
 //!   and stay opaque HTML inside their parent cell.
 //!
@@ -54,7 +54,7 @@ use std::rc::Rc;
 const MAX_SPAN: usize = 1000;
 
 /// Hard ceiling on total expanded grid cells (rows x columns) for one table.
-/// Above it the table is left untouched rather than expanded — 50k cells is
+/// Above it the table is left untouched rather than expanded, 50k cells is
 /// already far beyond any real document table (1000 rows x 50 columns), while
 /// a quadratic blow-up crosses it almost immediately.
 const MAX_GRID_CELLS: usize = 50_000;
@@ -63,7 +63,7 @@ const MAX_GRID_CELLS: usize = 50_000;
 /// `inner_html()`. Wikipedia inlines `<style>` TemplateStyles blocks *inside*
 /// table cells; captured as a cell value, one such block became a 64 KB
 /// "datum", and htmd pads every cell in a column out to that column's widest
-/// cell — so 151 rows each grew a ~64 KB run of spaces (609 KB -> 7.85 MB,
+/// cell, so 151 rows each grew a ~64 KB run of spaces (609 KB -> 7.85 MB,
 /// 97% of it whitespace).
 const CELL_NON_CONTENT_TAGS: [&str; 4] = ["style", "script", "noscript", "template"];
 
@@ -77,7 +77,7 @@ const CELL_NON_CONTENT_MARKERS: [&str; 5] = ["<style", "<script", "<noscript", "
 /// in a single cell means the cell captured something that is not data, and
 /// because htmd pads a column to its widest cell the cost is paid by every row.
 /// Over the ceiling the whole table is left untouched rather than truncated
-/// mid-markup — truncation would emit broken HTML. 4 KB is far above any real
+/// mid-markup, truncation would emit broken HTML. 4 KB is far above any real
 /// datum yet well below the runaway sizes observed on real pages.
 const MAX_CELL_HTML: usize = 4096;
 
@@ -110,8 +110,8 @@ fn cell_inner_html(cell: ElementRef<'_>) -> String {
     }
 }
 
-/// Normalize every top-level `<table>` in `html`, leaving everything else —
-/// including nested tables — byte-for-byte untouched.
+/// Normalize every top-level `<table>` in `html`, leaving everything else ,
+/// including nested tables, byte-for-byte untouched.
 pub fn normalize_tables(html: &str) -> String {
     let replacements = build_replacements(html);
     if replacements.iter().all(Option::is_none) {
@@ -218,7 +218,7 @@ fn build_replacement(table: ElementRef<'_>) -> Option<String> {
 
     // Reconcile the two sections: each grid was only rectangular within itself,
     // so a body row wider than every thead row (or vice versa) would otherwise
-    // serialize with cells that have no column in the other section — htmd then
+    // serialize with cells that have no column in the other section, htmd then
     // drops the overflow entirely.
     let width = thead_grid
         .iter()
@@ -288,13 +288,13 @@ fn parse_span(v: Option<&str>) -> usize {
 /// Grid expansion (pandas `_expand_colspan_rowspan` shape, hardened): a
 /// pending-cell map keyed by column, drained before EVERY column is consumed
 /// so a rowspan already occupying a column always wins over a new real cell
-/// landing there (pandas #58461 / #59721 — a colliding real cell is pushed to
+/// landing there (pandas #58461 / #59721, a colliding real cell is pushed to
 /// the next free column instead of overwriting the pending span). The drain
 /// has to run per column, not per cell: a `colspan` walking across a pending
 /// rowspan's column would otherwise consume the slot the span owns, dropping
 /// the spanned value from this row and re-emitting it a row later.
 ///
-/// Returns `None` when the expanded grid would exceed `MAX_GRID_CELLS` — the
+/// Returns `None` when the expanded grid would exceed `MAX_GRID_CELLS`, the
 /// caller then leaves the table untouched instead of materializing it.
 /// `full_width` is the table's true column count, used only to tell a
 /// full-width banner cell from a narrower header-group cell. Pass 0 to disable
@@ -483,7 +483,7 @@ fn splice_tables(html: &str, replacements: Vec<Option<String>>) -> String {
     // Fail-safe: the two parsers must agree on how many top-level tables the
     // document has. On tag soup (an unclosed `<table>` followed by another)
     // html5ever auto-closes and reports two siblings while `lol_html`'s raw
-    // token stream sees the second nested inside the first — replacing the
+    // token stream sees the second nested inside the first, replacing the
     // first would then swallow the second table's content outright. Any
     // disagreement means the index correlation is unsound, so drop the whole
     // splice and hand back the original bytes.
@@ -539,7 +539,7 @@ mod tests {
     }
 
     /// C3: the pending-rowspan drain ran once per CELL, so a `colspan` walking
-    /// across a pending span's column consumed that slot — the spanned value
+    /// across a pending span's column consumed that slot, the spanned value
     /// vanished from its row and reappeared a row later.
     #[test]
     fn colspan_crossing_a_pending_rowspan_keeps_its_slot() {
@@ -590,7 +590,7 @@ mod tests {
 
         assert!(
             out.len() < html.len() * 3,
-            "output {} bytes vs input {} bytes — quadratic blow-up",
+            "output {} bytes vs input {} bytes, quadratic blow-up",
             out.len(),
             html.len()
         );
@@ -768,7 +768,7 @@ mod tests {
         // Documents the actual lol_html behavior this module depends on:
         // `replace()` on the outer table does NOT suppress the tokenizer from
         // dispatching the `table` element handler for the nested table inside
-        // the replaced subtree — hence the depth counter. If lol_html ever
+        // the replaced subtree, hence the depth counter. If lol_html ever
         // changed this, `replacements` indices would desync and this test
         // would start failing loudly instead of silently mis-splicing.
         let html = r#"<table>
@@ -783,8 +783,8 @@ mod tests {
         let tables: Vec<_> = doc.select(&sel).collect();
         assert_eq!(tables.len(), 2, "outer + nested must both survive: {out}");
         assert!(out.contains("inner-only, no header"));
-        // The nested table must stay exactly as authored — no synthesized
-        // header, no thead — proving it was never independently replaced.
+        // The nested table must stay exactly as authored, no synthesized
+        // header, no thead, proving it was never independently replaced.
         let inner_html = tables[1].html();
         assert!(
             !inner_html.contains("<thead>"),
