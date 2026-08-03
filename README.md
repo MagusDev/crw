@@ -323,6 +323,7 @@ checks as CI. Setup, architecture, and crate layout: **[CONTRIBUTING.md](CONTRIB
   <a href="https://github.com/us" title="us"><img src="https://github.com/us.png?size=96" width="48" height="48" alt="us"/></a>
   <a href="https://github.com/santhreal" title="santhreal"><img src="https://github.com/santhreal.png?size=96" width="48" height="48" alt="santhreal"/></a>
   <a href="https://github.com/adambenhassen" title="adambenhassen"><img src="https://github.com/adambenhassen.png?size=96" width="48" height="48" alt="adambenhassen"/></a>
+  <a href="https://github.com/AsheTheWings" title="AsheTheWings"><img src="https://github.com/AsheTheWings.png?size=96" width="48" height="48" alt="AsheTheWings"/></a>
   <a href="https://github.com/paoloantinori" title="paoloantinori"><img src="https://github.com/paoloantinori.png?size=96" width="48" height="48" alt="paoloantinori"/></a>
   <a href="https://github.com/mj520" title="mj520"><img src="https://github.com/mj520.png?size=96" width="48" height="48" alt="mj520"/></a>
 </p>
