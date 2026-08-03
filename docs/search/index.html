@@ -338,10 +338,16 @@ resp = requests.post(
 #     json={&quot;query&quot;: &quot;web scraping tools&quot;, &quot;limit&quot;: 5},
 # )
 
+# The results sit directly in `data` on the hosted API; a self-hosted engine
+# nests them one level deeper as `data.results`. Read `results` when present,
+# fall back to `data` — works on both hosts.
+data = resp.json()[&quot;data&quot;]
+results = data[&quot;results&quot;] if isinstance(data, dict) and &quot;results&quot; in data else data
+
 # Each result row has: title, url, snippet, description, position, score.
 # `snippet` is the LLM-ready summary line (Firecrawl-compatible name);
 # `description` is the same value, kept as an alias.
-for item in resp.json()[&quot;data&quot;]:
+for item in results:
     print(item[&quot;title&quot;], item[&quot;url&quot;], item[&quot;snippet&quot;])</code></pre></div><div class="code-tab-panel" data-panel="1"><pre data-lang="javascript"><code class="language-javascript">const resp = await fetch(&quot;http://localhost:3000/v1/search&quot;, {
   method: &quot;POST&quot;,
   headers: { &quot;Content-Type&quot;: &quot;application/json&quot; },
@@ -349,7 +355,10 @@ for item in resp.json()[&quot;data&quot;]:
 });
 
 const body = await resp.json();
-console.log(body.data);</code></pre></div><div class="code-tab-panel" data-panel="2"><pre data-lang="bash"><code class="language-bash"># Self-hosted (no auth)
+// Hosted puts the results directly in `data`; a self-hosted engine nests them
+// as `data.results`. Read `results` when present, fall back to `data`.
+const { data } = body;
+console.log(data?.results ?? data);</code></pre></div><div class="code-tab-panel" data-panel="2"><pre data-lang="bash"><code class="language-bash"># Self-hosted (no auth)
 curl -X POST http://localhost:3000/v1/search \
   -H &quot;Content-Type: application/json&quot; \
   -d '{&quot;query&quot;: &quot;web scraping tools&quot;, &quot;limit&quot;: 5}'
@@ -375,9 +384,16 @@ curl -X POST https://api.fastcrw.com/v1/search \
 }</code></pre>
 <p><code>snippet</code> is the LLM-ready summary line — name kept identical to Firecrawl
 so existing pipelines work unchanged. <code>description</code> is the same value
-under the SearXNG-native name. Pick whichever; both are emitted.</p>
+under the search-backend-native name. Pick whichever; both are emitted.</p>
 <p>That is the flat response shape used when <code>sources</code> is not set.</p>
-<h2 id="parameters">Parameters</h2>
+<div class="callout callout-note"><div class="callout-icon"></div><div class="callout-content">**Where the results live depends on the host.** The shape of a result row is
+identical everywhere, but its position is not. The hosted API
+(`api.fastcrw.com`) returns the results **as `data` itself**, exactly as shown
+above, and puts `answer`, `citations`, `llmUsage` and `warnings` at the top
+level. A self-hosted engine wraps them one level deeper as `data.results`, with
+those four fields as siblings inside `data`. Portable clients should read
+`data.results` when it is present and fall back to `data`. Full side-by-side in
+[Response shapes](/response-shapes).</div></div><h2 id="parameters">Parameters</h2>
 <table>
 <thead>
 <tr>
@@ -605,7 +621,9 @@ under the SearXNG-native name. Pick whichever; both are emitted.</p>
   &quot;llmProvider&quot;: &quot;openai&quot;,
   &quot;llmModel&quot;: &quot;gpt-4o-mini&quot;
 }</code></pre>
-<p>The response wrapper carries:</p>
+<p>A self-hosted engine carries these inside <code>data</code>; the hosted API puts <code>answer</code>,
+<code>citations</code>, <code>llmUsage</code> and <code>warnings</code> at the top level, next to the results. Fields
+with nothing to report are omitted, not emitted as <code>null</code> or <code>[]</code>. Self-hosted:</p>
 <pre data-lang="json"><code class="language-json">{
   &quot;success&quot;: true,
   &quot;data&quot;: {
@@ -615,7 +633,7 @@ under the SearXNG-native name. Pick whichever; both are emitted.</p>
       { &quot;url&quot;: &quot;https://...&quot;, &quot;title&quot;: &quot;...&quot;, &quot;position&quot;: 0 }
     ],
     &quot;llmUsage&quot;: { &quot;inputTokens&quot;: 3420, &quot;outputTokens&quot;: 96, &quot;totalTokens&quot;: 3516, &quot;estimatedCostUsd&quot;: 0.0008, &quot;model&quot;: &quot;gpt-4o-mini&quot;, &quot;provider&quot;: &quot;openai&quot; },
-    &quot;warnings&quot;: []
+    &quot;warnings&quot;: [&quot;answer synthesis unavailable&quot;]
   }
 }</code></pre>
 <p>Citation discipline:</p>

@@ -581,7 +581,8 @@ console.log(result.json);</code></pre></div>
   -H &quot;Content-Type: application/json&quot; \
   -d '{&quot;query&quot;: &quot;fastcrw web scraper&quot;, &quot;limit&quot;: 3}' \
   | python3 -m json.tool | head -30</code></pre>
-<p>Expected: <code>&quot;data&quot;: {&quot;results&quot;: [...]}</code> with search results.</p>
+<p>Expected: <code>&quot;data&quot;: [...]</code> with search results. (Against a self-hosted engine the same
+call returns <code>&quot;data&quot;: {&quot;results&quot;: [...]}</code> — see <a href="/response-shapes">Response shapes</a>.)</p>
 <p><strong>5. SDK round-trip (Python)</strong></p>
 <pre data-lang="python"><code class="language-python">import os
 from crw import CrwClient
