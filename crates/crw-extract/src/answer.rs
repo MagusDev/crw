@@ -1060,9 +1060,9 @@ mod tests {
     // Over-abstention A/B: does the calibrated clause convert recoverable
     // over-abstentions into correct answers, WITHOUT raising incorrect?
     //
-    // Replays the SAME frozen sources through the REAL `synthesize()` twice —
+    // Replays the SAME frozen sources through the REAL `synthesize()` twice:
     // (guarded, no-calibrated) = current prod, vs (guarded + calibrated) =
-    // proposed — so search variance is removed and only the flag differs. A
+    // proposed, so search variance is removed and only the flag differs. A
     // grader LLM classifies each answer correct/incorrect/not_attempted, same
     // rubric as the eval. This isolates the flag's effect on identical inputs.
     //
