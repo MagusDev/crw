@@ -488,6 +488,10 @@ impl PageFetcher for HttpFetcher {
         };
         let mut use_proxy = proxy_first;
         let mut direct_rescue_used = false;
+        // Set when the DIRECT egress got NOTHING back from the origin: a connect-phase
+        // timeout, i.e. the blackholed SYN. See where it is set for why the shape is
+        // narrowed that far and why the 422 below depends on it.
+        let mut direct_connect_failed = false;
         // Set when the proxy is armed MID-LOOP (by a 429 or a header-announced
         // challenge) rather than by the latch. Such an attempt needs the same
         // direct-rescue guarantee the latched path gets, or a hung proxy turns a
@@ -601,6 +605,35 @@ impl PageFetcher for HttpFetcher {
                     direct_rescue_used = true;
                 }
                 Err(_) => {
+                    // The origin blackholed our direct SYNs and the proxy rescue then
+                    // failed to overturn that, so the original finding stands: nothing
+                    // answered for this URL. The verdict rests on the direct blackhole,
+                    // never on the proxy hang alone.
+                    //
+                    // Without this the class surfaced as `Timeout` -> 504, which pages
+                    // the 5xx watchdog as OUR outage, tells the caller to raise a
+                    // `timeout` for a host with no listening socket, and bills them. The
+                    // 422 path already refunds; it was simply unreachable once the proxy
+                    // retry was armed in front of it. `Ok(Err(_))` below still keeps a
+                    // fast-refusing proxy at 502 (`proxy_connect_failure_is_not_blamed_
+                    // on_the_caller`), so a dead pool cannot land here either.
+                    if direct_connect_failed {
+                        // Logged at this specific classification (rather than relying on the
+                        // generic 422 count) so a spike here is greppable on its own: this is
+                        // the one 422 shape that used to be a paging 504, so if it is ever OUR
+                        // fault (e.g. host-level starvation delaying both egresses' timers
+                        // alike) rather than a genuinely dead target, this line is how an
+                        // operator tells the two apart instead of the alert going quiet.
+                        tracing::warn!(
+                            url,
+                            "direct connect-timeout and proxy rescue both failed; \
+                             reporting target_unreachable (was: timeout)"
+                        );
+                        return Err(CrwError::TargetUnreachable(format!(
+                            "Could not reach {url}: no response from the origin over \
+                             either egress"
+                        )));
+                    }
                     return Err(CrwError::Timeout(remaining.as_millis() as u64));
                 }
                 Ok(Ok(r))
@@ -765,6 +798,22 @@ impl PageFetcher for HttpFetcher {
                         "direct egress could not reach {url} ({e}); retrying via proxy (egress_blocked)"
                     );
                     use_proxy = true;
+                    // Deliberately narrower than this arm's own guard. Only a
+                    // connect-phase TIMEOUT counts: we sent SYNs straight at the origin
+                    // and got zero packets back, which is a first-hand observation of
+                    // the ORIGIN, not an inference about the hop after it. A refused or
+                    // reset connection is excluded even though it also lands here,
+                    // because an RST proves a live TCP stack answered.
+                    //
+                    // That distinction is what makes the 422 below safe. A congested
+                    // (rather than down) proxy pool HANGS exactly like a proxy waiting
+                    // on a dead origin, so the hang on its own proves nothing; if the
+                    // verdict rested on it, our own pool degrading would be laundered
+                    // into a flood of caller-blaming refunds and the 5xx watchdog would
+                    // go quiet during a real outage. Requiring the direct blackhole
+                    // first means proxy congestion alone can never reach 422: a healthy
+                    // origin answers the direct attempt and the proxy is never armed.
+                    direct_connect_failed = e.is_connect() && e.is_timeout();
                 }
                 // Retry once on the same egress. Read-phase timeouts qualify (the origin
                 // connected and is slow — a retry may help). Connection-level failures
@@ -1415,6 +1464,114 @@ mod tests {
         assert!(
             matches!(err, CrwError::HttpError(_)),
             "a proxy-side failure must not be reported as TargetUnreachable (422); got {err:?}"
+        );
+    }
+
+    /// The counterpart to `proxy_connect_failure_is_not_blamed_on_the_caller`: when the
+    /// origin blackholes our direct SYNs AND the proxy then HANGS instead of refusing,
+    /// the origin is the root cause and the caller must get a 422, not a 504.
+    ///
+    /// The two tests together pin the discriminator: a proxy that is DOWN refuses fast
+    /// and stays a 502 (our fault), while a hanging proxy only ever confirms a verdict
+    /// the DIRECT attempt already reached on its own. Without this, a DNS-resolvable
+    /// host with no listening socket pages the 5xx watchdog, tells the caller to raise
+    /// a `timeout` that cannot help, and is billed rather than refunded.
+    #[tokio::test]
+    async fn direct_blackhole_then_hanging_proxy_is_target_unreachable() {
+        // proxy: accepts the connection but never answers, the hang shape.
+        let p = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let paddr = p.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = p.accept().await {
+                held.push(sock); // hold it open, write nothing
+            }
+        });
+        let fetcher = HttpFetcher {
+            // Short connect timeout so the direct blackhole resolves well inside the
+            // deadline and still leaves MIN_TIER_BUDGET to arm the proxy.
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_millis(300))
+                .build()
+                .unwrap(),
+            relaxed_client: None,
+            has_static_proxy: false,
+            ratelimit_proxy_client: Some(
+                build_client(
+                    "ua",
+                    Some(&format!("http://{paddr}")),
+                    std::time::Duration::from_secs(5),
+                    false,
+                )
+                .unwrap(),
+            ),
+            inject_stealth_headers: false,
+        };
+        // origin: 192.0.2.1 is RFC 5737 TEST-NET-1, never routed, so the SYN is
+        // blackholed and the direct attempt is a connect-phase timeout. Same address
+        // `connection_failure_catches_connect_timeout` relies on.
+        let err = fetcher
+            .fetch(
+                "http://192.0.2.1/",
+                &HashMap::new(),
+                None,
+                Deadline::from_request_ms(2_000),
+            )
+            .await
+            .expect_err("origin blackholes and the proxy never answers");
+        assert!(
+            matches!(err, CrwError::TargetUnreachable(_)),
+            "a blackholing origin behind a reachable-but-hanging proxy must surface as \
+             TargetUnreachable (422), not a 504; got {err:?}"
+        );
+    }
+
+    /// The revenue guard: an origin that REFUSES our direct connection is alive at the
+    /// TCP layer, so a later proxy hang must NOT be read as a dead target. Only a
+    /// direct blackhole earns the refunded 422; anything else stays a billed 504, which
+    /// also keeps a congested proxy pool visible to the 5xx watchdog instead of
+    /// laundering it into caller-blaming refunds.
+    #[tokio::test]
+    async fn direct_refusal_then_hanging_proxy_stays_a_timeout() {
+        let o = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let oaddr = o.local_addr().unwrap();
+        drop(o); // closed port: refuses with an RST rather than blackholing
+        let p = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let paddr = p.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = p.accept().await {
+                held.push(sock);
+            }
+        });
+        let fetcher = HttpFetcher {
+            client: reqwest::Client::new(),
+            relaxed_client: None,
+            has_static_proxy: false,
+            ratelimit_proxy_client: Some(
+                build_client(
+                    "ua",
+                    Some(&format!("http://{paddr}")),
+                    std::time::Duration::from_secs(5),
+                    false,
+                )
+                .unwrap(),
+            ),
+            inject_stealth_headers: false,
+        };
+        let err = fetcher
+            .fetch(
+                &format!("http://{oaddr}/"),
+                &HashMap::new(),
+                None,
+                Deadline::from_request_ms(2_000),
+            )
+            .await
+            .expect_err("origin refuses and the proxy never answers");
+        assert!(
+            matches!(err, CrwError::Timeout(_)),
+            "a live-but-refusing origin must stay a billed 504, not become a refunded \
+             422; got {err:?}"
         );
     }
 

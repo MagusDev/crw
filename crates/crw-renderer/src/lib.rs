@@ -475,10 +475,6 @@ enum HedgeOutcome {
 /// when both fail. Getting it wrong in the permissive direction (treating our fault as
 /// the origin's) would blame the caller for our outage, so the match is deliberately
 /// narrow.
-///
-/// `Timeout` is NOT included: a JS-tier timeout is just as likely to be a local CDP
-/// websocket/command timeout as a slow origin, and it already maps to 504 on its own,
-/// which is the honest answer either way.
 fn is_origin_navigation_failure(e: &CrwError) -> bool {
     match e {
         CrwError::TargetUnreachable(_) => true,
@@ -489,6 +485,22 @@ fn is_origin_navigation_failure(e: &CrwError) -> bool {
             let m = msg.to_ascii_lowercase();
             m.contains("navigation failed") || m.contains("net::err_")
         }
+        // A JS-tier timeout does not refute the HTTP tier's positive finding. Both
+        // callers only consult this when the HTTP error was already
+        // `TargetUnreachable`, i.e. two independent egresses failed to connect; a
+        // browser that then also gets no answer is absence of evidence, not evidence
+        // against. A host that blackholes SYNs hangs every tier, so chrome/lightpanda
+        // report a plain timeout and never a `net::ERR_*`, which is why the arm above
+        // alone never fired for this class. Safe because the pairing is required: an
+        // `http=Timeout` (slow origin) or `HttpError` (our proxy) is not
+        // `TargetUnreachable`, so a CDP-pool outage of ours can never be laundered
+        // into a caller-blaming 422 on its own. It also does not matter if THIS
+        // `js` timeout happens to be our own CDP connect (e.g. `cdp_conn.rs`'s
+        // websocket handshake) rather than a hung navigation: the 422 verdict
+        // rests on the HTTP tier's independent, already-verified
+        // `TargetUnreachable` finding, not on why the browser failed. The JS
+        // failure only ever needs to not contradict that finding.
+        CrwError::Timeout(_) => true,
         _ => false,
     }
 }
@@ -3715,6 +3727,7 @@ mod tests {
         Ok(String),
         OkStatus(u16, String),
         Err(String),
+        Timeout,
     }
 
     #[async_trait::async_trait]
@@ -3730,6 +3743,7 @@ mod tests {
                 MockBehavior::Ok(html) => (200u16, html.clone()),
                 MockBehavior::OkStatus(s, html) => (*s, html.clone()),
                 MockBehavior::Err(msg) => return Err(CrwError::RendererError(msg.clone())),
+                MockBehavior::Timeout => return Err(CrwError::Timeout(1)),
             };
             Ok(FetchResult {
                 url: url.to_string(),
@@ -3953,37 +3967,39 @@ mod tests {
         );
     }
 
+    /// An HTTP tier that cannot reach the origin at all, for the two attribution tests
+    /// below.
+    struct Unreachable;
+    #[async_trait::async_trait]
+    impl PageFetcher for Unreachable {
+        async fn fetch(
+            &self,
+            url: &str,
+            _h: &HashMap<String, String>,
+            _w: Option<u64>,
+            _d: crw_core::Deadline,
+        ) -> CrwResult<FetchResult> {
+            Err(CrwError::TargetUnreachable(format!(
+                "Could not reach {url}"
+            )))
+        }
+        fn name(&self) -> &str {
+            "http"
+        }
+        fn supports_js(&self) -> bool {
+            false
+        }
+        async fn is_available(&self) -> bool {
+            true
+        }
+    }
+
     /// When the HTTP tier could not reach the origin at all, that error must win over
     /// the JS tier's generic RendererError. `TargetUnreachable` maps to 422 (the caller
     /// gave us a dead target); `RendererError` falls through to a 500 and reads as "our
     /// server broke". Production emitted 11 such 500s that should have been 422s.
     #[tokio::test]
     async fn unreachable_origin_beats_js_renderer_error() {
-        struct Unreachable;
-        #[async_trait::async_trait]
-        impl PageFetcher for Unreachable {
-            async fn fetch(
-                &self,
-                url: &str,
-                _h: &HashMap<String, String>,
-                _w: Option<u64>,
-                _d: crw_core::Deadline,
-            ) -> CrwResult<FetchResult> {
-                Err(CrwError::TargetUnreachable(format!(
-                    "Could not reach {url}"
-                )))
-            }
-            fn name(&self) -> &str {
-                "http"
-            }
-            fn supports_js(&self) -> bool {
-                false
-            }
-            async fn is_available(&self) -> bool {
-                true
-            }
-        }
-
         let js = Arc::new(MockFetcher {
             name: "chrome",
             behavior: MockBehavior::Err("Navigation failed: net::ERR_SSL".to_string()),
@@ -4008,6 +4024,40 @@ mod tests {
             matches!(err, CrwError::TargetUnreachable(_)),
             "an unreachable origin must surface as TargetUnreachable (422), not the JS \
              tier's RendererError (500); got {err:?}"
+        );
+    }
+
+    /// The same rule when the JS tier TIMES OUT instead of reporting a navigation
+    /// error. A host that blackholes SYNs hangs the browser rather than producing a
+    /// `net::ERR_*`, so this is the shape the class actually takes in production: it
+    /// surfaced as a 504 that paged the 5xx watchdog, told the caller to raise a
+    /// `timeout` no host would ever answer, and billed them for it.
+    #[tokio::test]
+    async fn unreachable_origin_beats_js_timeout() {
+        let js = Arc::new(MockFetcher {
+            name: "chrome",
+            behavior: MockBehavior::Timeout,
+        });
+        let mut r = make_renderer_with_mocks(vec![js]);
+        r.http = Arc::new(Unreachable);
+        r.render_js_default = None; // auto branch
+
+        let err = r
+            .fetch(
+                "https://dead.example",
+                &HashMap::new(),
+                None, // render_js: auto
+                None, // wait_for_ms
+                None, // requested_renderer
+                tdl(),
+            )
+            .await
+            .expect_err("both tiers fail");
+
+        assert!(
+            matches!(err, CrwError::TargetUnreachable(_)),
+            "a dead origin that hangs the browser must surface as TargetUnreachable \
+             (422, refunded), not Timeout (504, billed); got {err:?}"
         );
     }
 
