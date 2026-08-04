@@ -1055,4 +1055,134 @@ mod tests {
             }
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Over-abstention A/B: does the calibrated clause convert recoverable
+    // over-abstentions into correct answers, WITHOUT raising incorrect?
+    //
+    // Replays the SAME frozen sources through the REAL `synthesize()` twice —
+    // (guarded, no-calibrated) = current prod, vs (guarded + calibrated) =
+    // proposed — so search variance is removed and only the flag differs. A
+    // grader LLM classifies each answer correct/incorrect/not_attempted, same
+    // rubric as the eval. This isolates the flag's effect on identical inputs.
+    //
+    //   RB_CAP=/path/cap50.jsonl \
+    //   LLM_URL=.. LLM_KEY=.. LLM_MODEL_PRO=.. \
+    //     cargo test -p crw-extract --release abstain_ab -- --nocapture --ignored
+    // ---------------------------------------------------------------------
+
+    fn env_llm() -> LlmConfig {
+        LlmConfig {
+            provider: "openai-compatible".into(),
+            api_key: std::env::var("LLM_KEY").expect("set LLM_KEY"),
+            model: std::env::var("LLM_MODEL_PRO").expect("set LLM_MODEL_PRO"),
+            base_url: Some(std::env::var("LLM_URL").expect("set LLM_URL")),
+            max_tokens: 1024,
+            temperature: Some(0.0),
+            ..Default::default()
+        }
+    }
+
+    async fn grade(cfg: &LlmConfig, q: &str, gold: &str, pred: &str) -> &'static str {
+        let sys = "Grade the predicted answer to a factual question. \
+            Reply ONLY one word: correct, incorrect, or not_attempted. \
+            correct = prediction contains the gold answer (paraphrase/extra ok). \
+            not_attempted = it declines / says it lacks evidence / hedges without committing. \
+            incorrect = it commits to a wrong answer.";
+        let user = format!("QUESTION: {q}\nGOLD: {gold}\nPREDICTED: {pred}");
+        match llm::chat(cfg, sys, &user).await {
+            Ok(r) => {
+                let c = r.content.to_lowercase();
+                if c.contains("not_attempted") || c.contains("not attempted") {
+                    "not_attempted"
+                } else if c.contains("incorrect") {
+                    "incorrect"
+                } else if c.contains("correct") {
+                    "correct"
+                } else {
+                    "not_attempted"
+                }
+            }
+            Err(_) => "not_attempted",
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "needs RB_CAP + live LLM creds; run explicitly"]
+    async fn abstain_ab() {
+        let path = std::env::var("RB_CAP").expect("set RB_CAP");
+        let cfg = env_llm();
+        let raw = std::fs::read_to_string(&path).expect("read RB_CAP");
+
+        // (correct, incorrect, not_attempted) for each arm.
+        let mut base = [0usize; 3]; // guarded only (current prod)
+        let mut calib = [0usize; 3]; // guarded + calibrated (proposed)
+        let mut flips: Vec<String> = Vec::new();
+        let mut n = 0;
+
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let row: serde_json::Value = serde_json::from_str(line).expect("bad line");
+            let q = row["q"].as_str().unwrap_or_default().to_string();
+            let gold = row["gold"].as_str().unwrap_or_default().to_string();
+            let sources: Vec<Source> = row["sources"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|s| {
+                    let md = s["markdown"].as_str().unwrap_or_default();
+                    if md.is_empty() {
+                        return None;
+                    }
+                    Some((
+                        s["url"].as_str().unwrap_or_default().to_string(),
+                        s["title"].as_str().unwrap_or_default().to_string(),
+                        md.to_string(),
+                    ))
+                })
+                .collect();
+            if sources.is_empty() {
+                continue;
+            }
+            n += 1;
+
+            // Both arms: guarded on, bm25_select on (prod parity). Only `calibrated` differs.
+            let a = synthesize(&q, &sources, &cfg, 8192, None, false, true, false, true).await;
+            let b = synthesize(&q, &sources, &cfg, 8192, None, true, true, false, true).await;
+            let pa = a.map(|r| r.content).unwrap_or_default();
+            let pb = b.map(|r| r.content).unwrap_or_default();
+            let ga = grade(&cfg, &q, &gold, &pa).await;
+            let gb = grade(&cfg, &q, &gold, &pb).await;
+            let idx = |g: &str| match g {
+                "correct" => 0,
+                "incorrect" => 1,
+                _ => 2,
+            };
+            base[idx(ga)] += 1;
+            calib[idx(gb)] += 1;
+            if ga != gb {
+                flips.push(format!(
+                    "  [{}] {ga} -> {gb}  gold={gold:?}\n      q: {q}",
+                    n - 1
+                ));
+            }
+        }
+
+        let show = |name: &str, s: &[usize; 3]| {
+            let acc = 100.0 * s[0] as f64 / n.max(1) as f64;
+            println!(
+                "{name:26}  correct {:2}  incorrect {:2}  abstain {:2}   acc {acc:.1}%",
+                s[0], s[1], s[2]
+            );
+        };
+        println!("\n=== over-abstention A/B (n={n}, frozen sources) ===");
+        show("guarded (current prod)", &base);
+        show("guarded + CALIBRATED", &calib);
+        if !flips.is_empty() {
+            println!("\n--- flips (base -> calibrated) ---");
+            for f in &flips {
+                println!("{f}");
+            }
+        }
+    }
 }
