@@ -56,6 +56,31 @@ chrome_intercept_resources = true
 # partial-DOM snapshot is returned with truncated=true.
 chrome_nav_budget_ms = 12000
 
+# Post-navigate challenge retry loop, cut from the default 3 to 1.
+#
+# A/B measured 2026-06-21 (plans/PHASE-RESULTS-2026-06-21.md, same binary, same
+# config, this knob alone): scrape-success 90% -> 90%, truth-recall 67.57% ->
+# 67.57%, median markdown 7816 -> 8218, and p90 23857 -> 20314 (-15%, -3543ms).
+# `quality_gate.py` verdict: PASS, 0 new failures, 0 content drops.
+#
+# The render-phase breakdown attributes 28% of render time to this loop (mean
+# 1028ms, p90 7209ms), and the pages that burn the full 3x3s never clear anyway,
+# so one retry loses nothing and keeps the fast-clearing CF challenges. Neither
+# Firecrawl (defaultWait=0, no retry loop) nor Spider runs a blind challenge
+# retry; we were the only one.
+#
+# The 2026-06-21 run recommended this for prod and it was never applied, so prod
+# ran the default 3 until now. Not set to 0 (Firecrawl-style) deliberately: 1
+# still clears a challenge that resolves on the first re-check.
+#
+# This knob is shared by both the `chrome` and `chrome_proxy` renderer tiers
+# (crw-renderer/src/lib.rs). The A/B above only exercised `chrome`; no
+# [renderer.chrome_proxy] tier is configured in this file, so retries=1 has no
+# effect on residential-egress recovery today. Re-validate before enabling
+# chrome_proxy: a challenge over a fresh residential IP may need more than one
+# re-check to clear.
+chrome_challenge_max_retries = 1
+
 # Phase 4 §B5: bounded browser-context pool. Validated 2026-05-11
 # (PROGRESS.md gap-closure): cookie/storage isolation T1 PASS, B2 sanity
 # ratio < 2× (T2), RSS soak chrome 1.08× over 500 reqs (T3), TOML flip
