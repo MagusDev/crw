@@ -195,7 +195,7 @@ After=network.target
 [Service]
 Type=simple
 User=nobody
-ExecStart=/usr/local/bin/lightpanda serve --host 127.0.0.1 --port 9222
+ExecStart=/usr/local/bin/lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks
 Restart=always
 RestartSec=5
 

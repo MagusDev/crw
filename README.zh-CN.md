@@ -331,7 +331,7 @@ crw-server setup
 自动下载 LightPanda 二进制文件到 `~/.local/bin/` 并创建正确的渲染器配置。然后启动 LightPanda 和 CRW：
 
 ```bash
-lightpanda serve --host 127.0.0.1 --port 9222 &
+lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks &
 crw-server
 ```
 

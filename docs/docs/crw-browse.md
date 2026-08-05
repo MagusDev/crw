@@ -62,7 +62,7 @@ google-chrome \
   --user-data-dir=/tmp/crw-chrome
 
 # Lightpanda (faster and lighter — no screenshots)
-lightpanda serve --host 127.0.0.1 --port 9222
+lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks
 ```
 
 ## Install

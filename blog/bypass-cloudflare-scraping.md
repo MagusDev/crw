@@ -158,7 +158,7 @@ cargo install crw-server
 crw-server setup
 
 # Start LightPanda in the background
-lightpanda serve --host 127.0.0.1 --port 9222 &
+lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks &
 
 # Start CRW
 crw-server

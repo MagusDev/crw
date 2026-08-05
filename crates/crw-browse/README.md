@@ -38,7 +38,7 @@ Start a CDP-enabled browser first, then point `crw-browse` at it:
 google-chrome --remote-debugging-port=9222 --headless=new --user-data-dir=/tmp/crw-chrome
 
 # Or Lightpanda
-lightpanda serve --host 127.0.0.1 --port 9222
+lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks
 ```
 
 Then:

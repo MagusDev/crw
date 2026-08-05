@@ -173,7 +173,7 @@ Fastest option. Lightweight browser engine purpose-built for scraping.
 crw-server setup
 
 # Manual start
-lightpanda serve --host 127.0.0.1 --port 9222 &
+lightpanda serve --host 127.0.0.1 --port 9222 --block-private-networks &
 ```
 
 ```toml
