@@ -349,7 +349,7 @@ licenses are available — **hello@fastcrw.com**.
 [Benchmarks](https://fastcrw.com/benchmarks) ·
 [Pricing](https://fastcrw.com/pricing) ·
 [Changelog](CHANGELOG.md) ·
-[Discord](https://discord.gg/kkFh2SC8) ·
+[Discord](https://discord.gg/KNQBfFVc9J) ·
 [X](https://x.com/fast_crw)
 
 ## Star History

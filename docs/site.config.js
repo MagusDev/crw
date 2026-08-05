@@ -156,7 +156,7 @@ export default {
       { title: "Community", links: [
         { label: "GitHub", href: "https://github.com/us/crw", external: true },
         { label: "Issues", href: "https://github.com/us/crw/issues", external: true },
-        { label: "Discord", href: "https://discord.gg/VNxv2DuBB", external: true },
+        { label: "Discord", href: "https://discord.gg/KNQBfFVc9J", external: true },
       ]},
       { title: "Legal", links: [
         { label: "License (AGPL-3.0)", href: "https://github.com/us/crw/blob/main/LICENSE", external: true },
@@ -164,7 +164,7 @@ export default {
     ],
     socials: [
       { icon: "github", href: "https://github.com/us/crw" },
-      { icon: "discord", href: "https://discord.gg/VNxv2DuBB" },
+      { icon: "discord", href: "https://discord.gg/KNQBfFVc9J" },
     ],
   },
 };
