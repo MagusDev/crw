@@ -389,6 +389,8 @@ LLM-backed extraction (<code>json</code>/<code>summary</code> formats) is <stron
 }</code></pre>
 <p>The value reflects the renderer cost only (a flat 1 credit for every renderer). On the managed cloud the SaaS billing layer may charge additional credits for LLM features (extraction, summary), which are tracked separately in <code>creditsUsed</code> on v2 responses and in your account billing dashboard.</p>
 <p>The field is omitted when its value would be 0 (internal paths that have not yet been priced).</p>
+<h2 id="hiding-credit-fields-on-self-hosted-mcp">Hiding credit fields on self-hosted MCP</h2>
+<p>Self-hosted instances have no billing layer, so <code>creditCost</code> / <code>creditsUsed</code> in MCP tool responses are pure context overhead (a handful of tokens per response). Set <code>[mcp] hide_credits = true</code> (or <code>CRW_MCP__HIDE_CREDITS=true</code>, or <code>--hide-credits</code> for a one-off) to strip them from every tool result on the <code>/mcp</code> endpoint, embedded <code>crw-mcp</code>, <code>crw mcp</code>, and proxy mode. Fields you extracted yourself are never stripped, even if your schema happens to name one <code>creditCost</code>. The REST API response shape is unchanged. See <a href="/docs/configuration">Configuration</a>.</p>
 <h2 id="balance-check">Balance check</h2>
 <p>Use <code>GET /api/v1/account/balance</code> (cloud only — fastcrw.com) with your API key to inspect included credits, purchased balance, and total available credits.</p>
 <h2 id="example-monitoring-pattern">Example Monitoring Pattern</h2>

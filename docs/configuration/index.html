@@ -407,6 +407,13 @@ max_concurrency = 4          # bounded fan-out for per-result summaries in /v1/s
 # sandbox = false            # isolate each parse in a child process (Unix only)
 # sandbox_memory_bytes = 536870912   # RLIMIT_AS for sandbox child (Unix); 512 MiB
 
+# MCP tool-response shaping (self-hosted). Strips credit-billing fields
+# (`creditCost` / `creditsUsed`) from MCP tool results — saves context tokens
+# and keeps the model's attention on the payload. MCP surfaces only; the REST
+# API is unchanged.
+# [mcp]
+# hide_credits = false
+
 [auth]
 # api_keys = [&quot;crw_live_key-1234&quot;]</code></pre>
 <h2 id="stealth-mode">Stealth mode</h2>
@@ -553,6 +560,10 @@ CRW_CONFIG=config.stealth crw-server</code></pre>
 <tr>
 <td><code>extraction.llm.require_byok_header</code></td>
 <td><code>CRW_EXTRACTION__LLM__REQUIRE_BYOK_HEADER</code></td>
+</tr>
+<tr>
+<td><code>mcp.hide_credits</code></td>
+<td><code>CRW_MCP__HIDE_CREDITS</code></td>
 </tr>
 <tr>
 <td><em>(boot guard)</em></td>

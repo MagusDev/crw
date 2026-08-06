@@ -426,11 +426,26 @@ claude mcp add crw \
 <td>Config file path (embedded mode only)</td>
 </tr>
 <tr>
+<td><code>--hide-credits</code></td>
+<td><code>CRW_MCP__HIDE_CREDITS</code></td>
+<td>Strip <code>creditCost</code>/<code>creditsUsed</code> from tool responses</td>
+</tr>
+<tr>
 <td>—</td>
 <td><code>RUST_LOG</code></td>
 <td>Log level (default: <code>crw_mcp=info</code>, logs go to stderr)</td>
 </tr>
 </tbody></table>
+<blockquote>
+<p><strong>Hiding credit fields (self-hosted):</strong> credits exist for the managed SaaS
+billing layer. On a self-hosted deployment they are unused bookkeeping that
+still costs context tokens on every tool response, so <code>[mcp] hide_credits = true</code> strips them from every tool result. It covers all three surfaces: the
+<code>/mcp</code> endpoint and embedded mode strip server-side, and proxy mode strips
+client-side after each call, since a remote&#39;s REST body is not shaped by your
+local config. <code>--hide-credits</code> is the one-off override. Values you extracted
+yourself are never touched, only the engine&#39;s own bookkeeping, and
+<code>tokensUsed</code> LLM telemetry is kept.</p>
+</blockquote>
 <h2 id="feature-flags">Feature Flags</h2>
 <table>
 <thead>
