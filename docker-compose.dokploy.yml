@@ -5,12 +5,11 @@
 #     (include_in_auto=true) so JS-heavy pages lightpanda can't render still
 #     get served instead of falling off the ladder.
 #   - The API port is NOT published to the host. Dokploy's Traefik reaches the
-#     container over `dokploy-network`; publishing 3000 on a public VPS would
-#     expose an unauthenticated scraper to the internet.
-#   - Auth is mandatory here (CRW_API_KEYS), not optional.
+#     container over `dokploy-network` and serves the domain set in its UI.
+#   - No auth: access is gated by the Tailscale network this host sits on.
+#     See the CRW_AUTH note on the crw service before exposing it publicly.
 #
-# Required env (set these in the Dokploy UI, not in the repo):
-#   CRW_API_KEYS       openssl rand -hex 32
+# Required env (set this in the Dokploy UI, not in the repo):
 #   SEARXNG_SECRET_KEY openssl rand -hex 32
 #
 # Optional:
@@ -63,13 +62,10 @@ services:
     # that image cannot serve anti-bot targets no matter how it is configured.
     image: ${CRW_IMAGE:-ghcr.io/magusdev/crw:camoufox}
     restart: unless-stopped
-    # Defaults to loopback so nothing is exposed by accident. For tailnet-only
-    # access set CRW_BIND_ADDR to the server's Tailscale IP (`tailscale ip -4`,
-    # a 100.x.y.z address) — binding to that interface means the port is
-    # reachable from the tailnet and from nowhere else, which is what makes
-    # disabling CRW_API_KEYS defensible. Never set it to 0.0.0.0 with auth off.
-    ports:
-      - "${CRW_BIND_ADDR:-127.0.0.1}:${CRW_HOST_PORT:-3000}:3000"
+    # No host port published: Dokploy's Traefik reaches this container over
+    # `dokploy-network` and terminates the domain you configure in its UI.
+    # (Upstream's docker-compose.yml publishes 0.0.0.0:3000 — do not copy that
+    # here; it would expose the API on every interface, bypassing Traefik.)
     depends_on:
       lightpanda:
         condition: service_started
@@ -80,13 +76,14 @@ services:
     environment:
       - RUST_LOG=info
       - CRW_CONFIG=config.docker
-      # `?` (no colon) errors only when CRW_API_KEYS is UNSET, so auth is a
-      # conscious choice rather than a default you can drift into. Setting it to
-      # an explicit empty string disables auth — legitimate when the only path
-      # to this port is a private network (tailnet, VPC), since crw treats an
-      # empty key list as "no auth" and the comma-split filters empties, so
-      # there is no empty-token-accepted state to fall into.
-      - CRW_AUTH__API_KEYS=${CRW_API_KEYS?set CRW_API_KEYS to a key, or to an empty string to disable auth (private-network deployments only)}
+      # No auth — this deployment is reachable only over a private Tailscale
+      # network, so the tailnet is the access control and crw's bearer check
+      # would be redundant. Matches upstream's default (config.default.toml
+      # leaves `[auth] api_keys` commented out = empty list = auth off).
+      #
+      # This is ONLY safe while the Dokploy domain resolves inside the tailnet.
+      # If it ever resolves publicly, every /v1/* route is open to the internet:
+      # set CRW_AUTH__API_KEYS=<key> here and send `Authorization: Bearer <key>`.
       - CRW_RENDERER__CAMOUFOX__BASE_URL=http://camoufox:9377
       # With no chrome tier, camoufox is the only renderer above lightpanda —
       # so it joins the auto ladder instead of being pin-only. Costs ~3s on the
