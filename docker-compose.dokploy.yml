@@ -63,6 +63,13 @@ services:
     # that image cannot serve anti-bot targets no matter how it is configured.
     image: ${CRW_IMAGE:-ghcr.io/magusdev/crw:camoufox}
     restart: unless-stopped
+    # Defaults to loopback so nothing is exposed by accident. For tailnet-only
+    # access set CRW_BIND_ADDR to the server's Tailscale IP (`tailscale ip -4`,
+    # a 100.x.y.z address) — binding to that interface means the port is
+    # reachable from the tailnet and from nowhere else, which is what makes
+    # disabling CRW_API_KEYS defensible. Never set it to 0.0.0.0 with auth off.
+    ports:
+      - "${CRW_BIND_ADDR:-127.0.0.1}:${CRW_HOST_PORT:-3000}:3000"
     depends_on:
       lightpanda:
         condition: service_started
@@ -73,9 +80,13 @@ services:
     environment:
       - RUST_LOG=info
       - CRW_CONFIG=config.docker
-      # Without at least one key every /v1/* route is open to the internet.
-      # `:?` fails the deploy loudly rather than silently shipping an open API.
-      - CRW_AUTH__API_KEYS=${CRW_API_KEYS:?set CRW_API_KEYS - refusing to deploy an unauthenticated scraper}
+      # `?` (no colon) errors only when CRW_API_KEYS is UNSET, so auth is a
+      # conscious choice rather than a default you can drift into. Setting it to
+      # an explicit empty string disables auth — legitimate when the only path
+      # to this port is a private network (tailnet, VPC), since crw treats an
+      # empty key list as "no auth" and the comma-split filters empties, so
+      # there is no empty-token-accepted state to fall into.
+      - CRW_AUTH__API_KEYS=${CRW_API_KEYS?set CRW_API_KEYS to a key, or to an empty string to disable auth (private-network deployments only)}
       - CRW_RENDERER__CAMOUFOX__BASE_URL=http://camoufox:9377
       # With no chrome tier, camoufox is the only renderer above lightpanda —
       # so it joins the auto ladder instead of being pin-only. Costs ~3s on the
