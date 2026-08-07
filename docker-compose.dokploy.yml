@@ -1,0 +1,179 @@
+# Production stack for Dokploy: crw + lightpanda + searxng + camoufox.
+#
+# Differences from the local dev stack:
+#   - No chrome / chrome-stealth tier. Camoufox takes over as the heavy tier
+#     (include_in_auto=true) so JS-heavy pages lightpanda can't render still
+#     get served instead of falling off the ladder.
+#   - The API port is NOT published to the host. Dokploy's Traefik reaches the
+#     container over `dokploy-network`; publishing 3000 on a public VPS would
+#     expose an unauthenticated scraper to the internet.
+#   - Auth is mandatory here (CRW_API_KEYS), not optional.
+#
+# Required env (set these in the Dokploy UI, not in the repo):
+#   CRW_API_KEYS       openssl rand -hex 32
+#   SEARXNG_SECRET_KEY openssl rand -hex 32
+#
+# Optional:
+#   CRW_IMAGE          defaults to ghcr.io/magusdev/crw:camoufox. Override only
+#                      with another camoufox-enabled build — the stock
+#                      ghcr.io/us/crw will start fine and then fail every
+#                      anti-bot target, which is a confusing way to break.
+#
+# Deploy:  docker compose -f docker-compose.dokploy.yml up -d
+#
+# ── Building the image ───────────────────────────────────────────────────────
+# `camoufox` is a Rust compile-time feature, so the published ghcr.io/us/crw
+# image (built `--features cdp` only) can NOT serve anti-bot targets no matter
+# how it is configured. A custom build is unavoidable; you only choose where it
+# happens. Either push from your machine:
+#
+#   docker build --platform linux/amd64 \
+#     --build-arg CARGO_PKGS="-p crw-server --features cdp,camoufox" \
+#     -t ghcr.io/<you>/crw:camoufox --push .
+#
+# ...or let Dokploy build on the server by replacing this service's `image:`
+# with the equivalent `build:` block (no registry needed, but every redeploy
+# pays a full Rust compile — ~20 min and ~8GB RAM):
+#
+#   build:
+#     context: .
+#     args:
+#       CARGO_PKGS: "-p crw-server --features cdp,camoufox"
+#
+# ── Running this stack locally ───────────────────────────────────────────────
+# `dokploy-network` only exists on the server, and no host port is published
+# here by design. To exercise the exact deploy config on a dev box, layer a
+# throwaway override:
+#
+#   cat > local.yml <<'EOF'
+#   services:
+#     crw:
+#       ports: ["127.0.0.1:3000:3000"]
+#   networks:
+#     dokploy-network:
+#       external: false
+#   EOF
+#   CRW_IMAGE=crw:camoufox CRW_API_KEYS=dev SEARXNG_SECRET_KEY=dev \
+#     docker compose -f docker-compose.dokploy.yml -f local.yml up -d
+
+services:
+  crw:
+    # MUST be a camoufox-enabled build. The published ghcr.io/us/crw image is
+    # compiled `--features cdp` only — camoufox is a compile-time feature, so
+    # that image cannot serve anti-bot targets no matter how it is configured.
+    image: ${CRW_IMAGE:-ghcr.io/magusdev/crw:camoufox}
+    restart: unless-stopped
+    depends_on:
+      lightpanda:
+        condition: service_started
+      camoufox:
+        condition: service_healthy
+      searxng:
+        condition: service_healthy
+    environment:
+      - RUST_LOG=info
+      - CRW_CONFIG=config.docker
+      # Without at least one key every /v1/* route is open to the internet.
+      # `:?` fails the deploy loudly rather than silently shipping an open API.
+      - CRW_AUTH__API_KEYS=${CRW_API_KEYS:?set CRW_API_KEYS - refusing to deploy an unauthenticated scraper}
+      - CRW_RENDERER__CAMOUFOX__BASE_URL=http://camoufox:9377
+      # With no chrome tier, camoufox is the only renderer above lightpanda —
+      # so it joins the auto ladder instead of being pin-only. Costs ~3s on the
+      # pages that reach it; without it they simply fail.
+      - CRW_RENDERER__CAMOUFOX__INCLUDE_IN_AUTO=true
+    volumes:
+      - ./config.docker.toml:/app/config.docker.toml:ro
+    mem_limit: 2g
+    memswap_limit: 2g
+    pids_limit: 512
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - default
+      - dokploy-network
+
+  lightpanda:
+    image: lightpanda/browser:latest
+    restart: unless-stopped
+    environment:
+      - LIGHTPANDA_DISABLE_TELEMETRY=true
+    command:
+      - "/bin/lightpanda"
+      - "serve"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "9222"
+      - "--log-level"
+      - "info"
+      - "--block-private-networks"
+      - "--block-cidrs"
+      - "0.0.0.0/8,10.0.0.0/8,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.168.0.0/16,100.64.0.0/10,224.0.0.0/4,240.0.0.0/4,192.0.0.0/24,192.0.2.0/24,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,fc00::/7,fe80::/10,fec0::/10,ff00::/8,::/96,64:ff9b:1::/48,2002::/16"
+    mem_limit: 1g
+    memswap_limit: 1g
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9222"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  # Anti-fingerprint tier: patched Firefox, headful under xvfb. This is what
+  # clears Vercel Bot Management / DataDome / Cloudflare challenges that
+  # headless Chromium fails on attestation.
+  camoufox:
+    image: ghcr.io/jo-inc/camofox-browser:latest
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    shm_size: "1g"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:9377/tabs').then(()=>process.exit(0)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # AGPL note unchanged from docker-compose.yml: upstream image, unmodified,
+  # our settings.yml mounted read-only. Not published to the host — reachable
+  # only as `searxng:8080` on the internal network.
+  searxng:
+    image: searxng/searxng:2026.5.9-0cba32c15
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    memswap_limit: 512m
+    pids_limit: 256
+    environment:
+      - SEARXNG_BASE_URL=http://searxng:8080/
+      - SEARXNG_SECRET_KEY=${SEARXNG_SECRET_KEY:?set SEARXNG_SECRET_KEY - openssl rand -hex 32}
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # The `chown: Operation not permitted` lines this prints at boot are
+    # expected and harmless: cap_drop ALL removes CAP_CHOWN, and the process
+    # runs as root which already owns both tmpfs mounts. Writes work.
+    tmpfs:
+      - /tmp:size=64m
+      - /var/cache/searxng:size=128m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+networks:
+  # Dokploy's shared Traefik network. Created by Dokploy on the server; declared
+  # external so compose attaches instead of trying to create it.
+  dokploy-network:
+    external: true
+  default:

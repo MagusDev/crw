@@ -40,6 +40,10 @@ const OUTER_HTML_EXPR: &str = "document.documentElement.outerHTML";
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Budget for the `is_available` health probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Ceiling on the post-challenge settle wait when the caller gave no `waitFor`.
+/// Only ever spent on a page that already tripped [`looks_like_wall`], and the
+/// sidecar returns as soon as the page settles — this is a cap, not a sleep.
+const DEFAULT_SETTLE_MS: u64 = 10_000;
 
 /// Opt-in Camoufox stealth renderer. Construct via [`CamoufoxRenderer::new`].
 pub struct CamoufoxRenderer {
@@ -156,6 +160,34 @@ impl CamoufoxRenderer {
         ))
     }
 
+    /// Block until the sidecar reports the page settled (`waitForPageReady`:
+    /// document ready + network idle), bounded by `wait_for_ms` when the caller
+    /// supplied one and by the deadline clamp always.
+    ///
+    /// Best-effort: a failed or timed-out wait is NOT fatal — we snapshot
+    /// whatever rendered, matching the CDP tiers' partial-snapshot behavior.
+    async fn wait_for_ready(
+        &self,
+        tab_id: &str,
+        user_id: &str,
+        wait_for_ms: Option<u64>,
+        deadline: &Deadline,
+    ) {
+        let timeout_ms = wait_for_ms
+            .unwrap_or(DEFAULT_SETTLE_MS)
+            .min(self.call_budget(deadline).as_millis() as u64);
+        if timeout_ms == 0 {
+            return;
+        }
+        let body = serde_json::json!({ "userId": user_id, "timeout": timeout_ms });
+        if let Err(e) = self
+            .post_json(&format!("/tabs/{tab_id}/wait"), &body, deadline)
+            .await
+        {
+            tracing::debug!(renderer = %self.name, error = %e, "camoufox wait failed; snapshotting anyway");
+        }
+    }
+
     /// Evaluate `document.documentElement.outerHTML` and return the DOM string.
     async fn evaluate_outer_html(
         &self,
@@ -213,10 +245,11 @@ impl CamoufoxRenderer {
         url: &str,
         user_id: &str,
         session_key: &str,
+        wait_for_ms: Option<u64>,
         deadline: &Deadline,
     ) -> CrwResult<(u16, String)> {
         let inner = self
-            .run_sequence_inner(url, user_id, session_key, deadline)
+            .run_sequence_inner(url, user_id, session_key, wait_for_ms, deadline)
             .await;
         self.destroy_session(user_id).await;
         inner
@@ -227,10 +260,31 @@ impl CamoufoxRenderer {
         url: &str,
         user_id: &str,
         session_key: &str,
+        wait_for_ms: Option<u64>,
         deadline: &Deadline,
     ) -> CrwResult<(u16, String)> {
         let tab_id = self.create_tab(url, user_id, session_key, deadline).await?;
-        let html = self.evaluate_outer_html(&tab_id, user_id, deadline).await?;
+        // An explicit `waitFor` is the caller's instruction — honor it before the
+        // first snapshot. Absent, snapshot immediately: the sidecar navigates with
+        // `waitUntil: 'domcontentloaded'`, which is already complete for SSR pages
+        // (the common case), and paying a blind settle on every request costs
+        // seconds on pages whose network never idles.
+        if wait_for_ms.is_some() {
+            self.wait_for_ready(&tab_id, user_id, wait_for_ms, deadline)
+                .await;
+        }
+        let mut html = self.evaluate_outer_html(&tab_id, user_id, deadline).await?;
+        // A challenge caught mid-flight is not a blocked page — Cloudflare swaps
+        // the DOM for the real content once its JS clears. Snapshotting straight
+        // after `domcontentloaded` reliably catches that interstitial (measured:
+        // g2.com returns the 2.5kB challenge shell 3/3 without this, and the full
+        // 867kB page with it). Wait for the page to settle, then re-snapshot once.
+        if looks_like_wall(&html).is_some() {
+            tracing::debug!(renderer = %self.name, "camoufox saw a challenge; waiting for it to clear");
+            self.wait_for_ready(&tab_id, user_id, wait_for_ms, deadline)
+                .await;
+            html = self.evaluate_outer_html(&tab_id, user_id, deadline).await?;
+        }
         // A bot wall or an empty body is a failure for THIS tier — surface it as
         // a retryable RendererError so the fallback loop / breaker can react.
         if html.trim().is_empty() {
@@ -255,17 +309,37 @@ impl CamoufoxRenderer {
 /// report a retryable failure instead of returning a useless challenge page.
 fn looks_like_wall(html: &str) -> Option<&'static str> {
     let h = html.to_ascii_lowercase();
+    // Visible-text phrases. These only ever render on an interstitial, so they
+    // stand on their own at any page size.
     const NEEDLES: &[(&str, &str)] = &[
         ("just a moment", "challenge"),
         ("verifying you are human", "challenge"),
         ("checking your browser before", "challenge"),
-        ("cf-challenge", "challenge"),
-        ("/cdn-cgi/challenge-platform", "challenge"),
         ("attention required! | cloudflare", "wall"),
         ("enable javascript and cookies to continue", "wall"),
     ];
+    // Script-tag markers. Cloudflare injects its JS-detection script into EVERY
+    // page it fronts, not just challenges, so these cannot condemn a page on
+    // their own — k-ruoka.fi returns its real 195kB homepage carrying
+    // `/cdn-cgi/challenge-platform/`, while g2.com's genuine interstitial is a
+    // 2.5kB shell. Size is what separates them, matching the weak-marker guard
+    // `detector::looks_like_cloudflare_challenge` already uses.
+    //
+    // ponytail: size threshold, not content analysis. A challenge shell padded
+    // past 80kB would slip through — parse the body text (as
+    // `detector::looks_like_generic_bot_wall` does) if that ever shows up.
+    const SCRIPT_NEEDLES: &[(&str, &str)] = &[
+        ("cf-challenge", "challenge"),
+        ("/cdn-cgi/challenge-platform", "challenge"),
+    ];
+    const INTERSTITIAL_MAX_BYTES: usize = 80_000;
     NEEDLES
         .iter()
+        .chain(
+            SCRIPT_NEEDLES
+                .iter()
+                .filter(|_| html.len() <= INTERSTITIAL_MAX_BYTES),
+        )
         .find(|(needle, _)| h.contains(needle))
         .map(|(_, kind)| *kind)
 }
@@ -276,7 +350,7 @@ impl PageFetcher for CamoufoxRenderer {
         &self,
         url: &str,
         _headers: &HashMap<String, String>,
-        _wait_for_ms: Option<u64>,
+        wait_for_ms: Option<u64>,
         deadline: Deadline,
     ) -> CrwResult<FetchResult> {
         if deadline.expired() {
@@ -288,7 +362,7 @@ impl PageFetcher for CamoufoxRenderer {
         let user_id = Self::rand_id("crw_");
         let session_key = Self::rand_id("task_");
         let (status, html) = self
-            .run_sequence(url, &user_id, &session_key, &deadline)
+            .run_sequence(url, &user_id, &session_key, wait_for_ms, &deadline)
             .await?;
 
         Ok(FetchResult {
@@ -392,6 +466,128 @@ mod tests {
         assert_eq!(res.status_code, 200);
         assert!(res.html.contains("real content"));
         // server drop verifies the expect(1) on the DELETE mock
+    }
+
+    /// A challenge caught mid-flight must be waited out and re-snapshotted, not
+    /// reported as a block. Without this the tier fails every Cloudflare-fronted
+    /// page it would otherwise win (measured on g2.com, 3/3).
+    #[tokio::test]
+    async fn challenge_is_waited_out_then_resnapshotted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tabId": "t1", "url": "https://example.com"
+            })))
+            .mount(&server)
+            .await;
+        // The settle wait must fire exactly once — only on the challenge path.
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/wait"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true, "ready": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // First evaluate returns the interstitial, second the cleared page.
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/evaluate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": "<html><head><script src=\"/cdn-cgi/challenge-platform/x.js\"></script></head></html>"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/evaluate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": "<html><body>the real page well past the empty threshold</body></html>"
+            })))
+            .mount(&server)
+            .await;
+        mount_delete_session(&server).await;
+
+        let r = renderer(&server.uri());
+        let res = r
+            .fetch("https://example.com", &HashMap::new(), None, deadline())
+            .await
+            .expect("a cleared challenge must not fail the fetch");
+        assert!(res.html.contains("the real page"));
+    }
+
+    /// A challenge that never clears still fails — the retry must not paper over
+    /// a genuine block by returning the interstitial as content.
+    #[tokio::test]
+    async fn challenge_that_never_clears_still_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tabId": "t1", "url": "https://example.com"
+            })))
+            .mount(&server)
+            .await;
+        // A failing wait must not abort the sequence — it is best-effort.
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/wait"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/evaluate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": "<html><body>Just a moment... verifying you are human</body></html>"
+            })))
+            .mount(&server)
+            .await;
+        mount_delete_session(&server).await;
+
+        let r = renderer(&server.uri());
+        let err = r
+            .fetch("https://example.com", &HashMap::new(), None, deadline())
+            .await
+            .expect_err("an unresolved challenge must still be a failure");
+        assert!(err.to_string().contains("bot challenge detected"));
+    }
+
+    /// No challenge, no `waitFor` → the settle wait must never fire. This is what
+    /// keeps the common (SSR) path at ~2.7s instead of burning the full timeout
+    /// on pages whose network never idles.
+    #[tokio::test]
+    async fn clean_page_never_waits() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/tabs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tabId": "t1", "url": "https://example.com"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/wait"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/tabs/t1/evaluate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": "<html><body>clean page well past the empty threshold here</body></html>"
+            })))
+            .mount(&server)
+            .await;
+        mount_delete_session(&server).await;
+
+        let r = renderer(&server.uri());
+        r.fetch("https://example.com", &HashMap::new(), None, deadline())
+            .await
+            .expect("fetch should succeed");
+        // server drop verifies the expect(0) on the wait mock
     }
 
     #[tokio::test]
@@ -614,6 +810,19 @@ mod tests {
             looks_like_wall("Please enable JavaScript and cookies to continue"),
             Some("wall")
         );
+        // A full-size page carrying Cloudflare's JS-detection script is real
+        // content, not an interstitial. Measured: k-ruoka.fi's homepage renders
+        // 195kB with `/cdn-cgi/challenge-platform/` in a <script src>, while
+        // g2.com's genuine challenge shell is 2.5kB.
+        let real_page = format!(
+            "<html><body><script src=/cdn-cgi/challenge-platform/x></script>{}</body></html>",
+            "real article text ".repeat(6000)
+        );
+        assert!(real_page.len() > 80_000);
+        assert_eq!(looks_like_wall(&real_page), None);
+        // ...but a visible-text phrase still condemns a page of any size.
+        let big_interstitial = format!("<html><body>Just a moment...{}</body></html>", "x".repeat(90_000));
+        assert_eq!(looks_like_wall(&big_interstitial), Some("challenge"));
         assert_eq!(
             looks_like_wall("<html><body>normal page</body></html>"),
             None
